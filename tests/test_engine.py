@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from ai_trader.config import Settings
-from ai_trader.engine import BrightDataClient
+from ai_trader.engine import AnalysisRequest, BrightDataClient, RecommendationEngine, SourceWeights
 
 
 class _FakeResponse:
@@ -51,6 +51,34 @@ class BrightDataTests(unittest.TestCase):
         self.assertEqual(captured["payload"]["country"], "US")
         self.assertEqual(captured["payload"]["format"], "json")
         self.assertEqual(captured["auth"], "Bearer test-key")
+
+
+class AllocationTests(unittest.TestCase):
+    def test_pool_allocations_are_normalized_from_scores(self) -> None:
+        settings = Settings(
+            codex_bin="codex",
+            robinhood_mcp_url="https://agent.robinhood.com/mcp/trading",
+            enable_web_search=True,
+            max_budget_usd=Decimal("5"),
+            default_budget_usd=Decimal("5"),
+        )
+        engine = RecommendationEngine(settings)
+        result = engine._normalize_allocations(
+            {
+                "pool": [
+                    {"symbol": "AAPL", "score": 0.4, "allocation_usd": 0},
+                    {"symbol": "NVDA", "score": 0.1, "allocation_usd": 0},
+                ]
+            },
+            AnalysisRequest(
+                budget=Decimal("5"),
+                pool_size=2,
+                weights=SourceWeights(reddit=0.3, x=0.3, realtime=0.4),
+            ),
+        )
+
+        self.assertEqual(result["pool"][0]["allocation_usd"], 4.0)
+        self.assertEqual(result["pool"][1]["allocation_usd"], 1.0)
 
 
 if __name__ == "__main__":

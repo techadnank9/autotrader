@@ -163,7 +163,7 @@ Context JSON:
 Return valid JSON only:
 {{
   "pool": [
-    {{"symbol": "AAPL", "score": 0.0, "reason": "short reason", "allocation_usd": 0.0}}
+    {{"symbol": "AAPL", "score": 0.0, "reason": "short reason"}}
   ],
   "recommendation": {{
     "decision": "buy" | "no_trade",
@@ -238,12 +238,41 @@ class RecommendationEngine:
         pool = DEFAULT_UNIVERSE[: request_model.pool_size]
         context = self.bright_data.collect(pool)
         result = self.llm.recommend(request_model, context)
+        result = self._normalize_allocations(result, request_model)
         result["meta"] = {
             "bright_data_mode": context.get("mode", "bright_data"),
             "budget": money_string(request_model.budget),
             "pool_size": request_model.pool_size,
             "trade_default": "no_op",
         }
+        return result
+
+    def _normalize_allocations(
+        self,
+        result: dict[str, Any],
+        request_model: AnalysisRequest,
+    ) -> dict[str, Any]:
+        pool = result.get("pool")
+        if not isinstance(pool, list) or not pool:
+            result["pool"] = []
+            return result
+
+        scores = [max(_to_decimal(item.get("score")), Decimal("0")) for item in pool]
+        total_score = sum(scores)
+        if total_score <= 0:
+            equal = (request_model.budget / Decimal(len(pool))).quantize(Decimal("0.01"))
+            for item in pool:
+                item["allocation_usd"] = float(equal)
+            return result
+
+        remaining = request_model.budget
+        for index, item in enumerate(pool):
+            if index == len(pool) - 1:
+                allocation = max(remaining, Decimal("0"))
+            else:
+                allocation = (request_model.budget * scores[index] / total_score).quantize(Decimal("0.01"))
+                remaining -= allocation
+            item["allocation_usd"] = float(allocation)
         return result
 
     def trade_prompt(self, recommendation: dict[str, Any], execute: bool) -> dict[str, Any]:
@@ -315,3 +344,10 @@ Return valid JSON only with status, symbol, dollar_amount, order_id, and warning
             "stderr": result.stderr[-1200:],
             "returncode": result.returncode,
         }
+
+
+def _to_decimal(value: Any) -> Decimal:
+    try:
+        return Decimal(str(value))
+    except Exception:
+        return Decimal("0")
