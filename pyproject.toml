@@ -1,0 +1,13 @@
+[project]
+name = "ai-trader"
+version = "0.1.0"
+description = "FastAPI + Codex + Robinhood MCP trading cockpit with Bright Data market context."
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "httpx>=0.28",
+    "uvicorn[standard]>=0.30",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

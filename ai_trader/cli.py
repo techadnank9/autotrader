@@ -1,0 +1,135 @@
+from __future__ import annotations
+
+import argparse
+import json
+from decimal import Decimal, InvalidOperation
+
+from ai_trader.config import Settings
+from ai_trader.robinhood import RobinhoodTrader, print_query_result
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Codex + Robinhood MCP stock trader.")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    run_parser = subparsers.add_parser("run", help="Launch an interactive Codex trading session.")
+    run_parser.add_argument(
+        "--mode",
+        choices=["recommend", "preview", "live"],
+        default="recommend",
+        help="How far the Codex prompt should go.",
+    )
+    run_parser.add_argument(
+        "--budget",
+        default=None,
+        help="Dollar budget, capped by MAX_BUDGET_USD.",
+    )
+    run_parser.add_argument(
+        "--objective",
+        default="Recommend one stock to buy today for about $5 in my Robinhood Agentic account.",
+        help="Trading objective for the Codex prompt.",
+    )
+    run_parser.add_argument(
+        "--print-only",
+        action="store_true",
+        help="Print the generated Codex command and prompt without launching Codex.",
+    )
+
+    prompt_parser = subparsers.add_parser("prompt", help="Print the generated Codex prompt only.")
+    prompt_parser.add_argument("--mode", choices=["recommend", "preview", "live"], default="recommend")
+    prompt_parser.add_argument("--budget", default=None)
+    prompt_parser.add_argument(
+        "--objective",
+        default="Recommend one stock to buy today for about $5 in my Robinhood Agentic account.",
+    )
+
+    query_parser = subparsers.add_parser(
+        "query",
+        help="Launch Codex with a direct Robinhood MCP search prompt.",
+    )
+    query_parser.add_argument(
+        "--query",
+        default="AAPL",
+        help="Search text to send to Robinhood MCP.",
+    )
+    query_parser.add_argument(
+        "--interactive",
+        action="store_true",
+        help="Launch interactive Codex instead of capturing codex exec output in Python.",
+    )
+    query_parser.add_argument(
+        "--print-only",
+        action="store_true",
+        help="Print the generated Codex command and prompt without launching Codex.",
+    )
+
+    subparsers.add_parser("doctor", help="Inspect Codex and Robinhood MCP readiness.")
+    return parser.parse_args()
+
+
+def _parse_budget(raw: str | None, settings: Settings) -> Decimal:
+    if raw is None:
+        return settings.default_budget_usd
+    try:
+        value = Decimal(raw)
+    except InvalidOperation as exc:
+        raise ValueError(f"Invalid budget value: {raw!r}") from exc
+    if value <= 0:
+        raise ValueError("Budget must be greater than zero.")
+    if value > settings.max_budget_usd:
+        raise ValueError(
+            f"Budget {value} exceeds MAX_BUDGET_USD {settings.max_budget_usd}."
+        )
+    return value
+
+
+def _print_plan(command: list[str], prompt: str) -> None:
+    print(json.dumps({"command": command, "prompt": prompt}, indent=2))
+
+
+def main() -> int:
+    args = parse_args()
+    try:
+        settings = Settings.load()
+        trader = RobinhoodTrader(settings)
+
+        if args.command == "doctor":
+            print(json.dumps(trader.doctor(), indent=2))
+            return 0
+
+        if args.command == "query":
+            plan = (
+                trader.build_search_plan(args.query)
+                if args.interactive
+                else trader.build_search_exec_plan(args.query)
+            )
+            if args.print_only:
+                _print_plan(plan.command, plan.prompt)
+                return 0
+            if args.interactive:
+                print(f"Launching interactive Codex query for {args.query}.")
+                return trader.launch(plan)
+            result = trader.run_query_capture(args.query)
+            print_query_result(result)
+            return result.returncode
+
+        budget = _parse_budget(args.budget, settings)
+        plan = trader.build_plan(args.mode, args.objective, budget)
+
+        if args.command == "prompt":
+            print(plan.prompt)
+            return 0
+
+        if args.print_only:
+            _print_plan(plan.command, plan.prompt)
+            return 0
+
+        print(f"Launching Codex in {args.mode} mode.")
+        return trader.launch(plan)
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI Trader</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="workspace">
+        <aside class="rail">
+          <div>
+            <p class="eyebrow">Robinhood MCP</p>
+            <h1>AI Trader</h1>
+          </div>
+
+          <label class="field">
+            <span>Budget</span>
+            <input id="budget" type="number" min="1" max="5" step="0.01" value="5" />
+          </label>
+
+          <label class="field">
+            <span>Pool size</span>
+            <input id="pool-size" type="number" min="1" max="10" step="1" value="5" />
+          </label>
+
+          <div class="weights">
+            <div class="section-label">Source weights</div>
+            <label>
+              <span>Reddit <strong id="reddit-label">35</strong></span>
+              <input id="reddit" type="range" min="0" max="100" value="35" />
+            </label>
+            <label>
+              <span>X <strong id="x-label">25</strong></span>
+              <input id="x" type="range" min="0" max="100" value="25" />
+            </label>
+            <label>
+              <span>Realtime <strong id="realtime-label">40</strong></span>
+              <input id="realtime" type="range" min="0" max="100" value="40" />
+            </label>
+          </div>
+
+          <button id="analyze" class="primary">Analyze</button>
+        </aside>
+
+        <section class="main">
+          <header class="topline">
+            <div>
+              <p class="eyebrow">Default execution</p>
+              <h2>No-op until confirmed</h2>
+            </div>
+            <div id="status" class="status">Idle</div>
+          </header>
+
+          <div class="recommendation">
+            <div class="symbol" id="symbol">--</div>
+            <div>
+              <p id="decision">Run analysis to build a pool.</p>
+              <p id="rationale" class="muted">Bright Data context and Codex ranking will appear here.</p>
+            </div>
+          </div>
+
+          <div class="grid">
+            <section class="panel pool-panel">
+              <div class="section-label">Candidate pool</div>
+              <div class="table">
+                <div class="row head">
+                  <span>Symbol</span>
+                  <span>Score</span>
+                  <span>Allocation</span>
+                  <span>Reason</span>
+                </div>
+                <div id="pool"></div>
+              </div>
+            </section>
+
+            <section class="panel">
+              <div class="section-label">Signals</div>
+              <dl class="signals">
+                <dt>Reddit</dt>
+                <dd id="reddit-summary">--</dd>
+                <dt>X</dt>
+                <dd id="x-summary">--</dd>
+                <dt>Realtime</dt>
+                <dd id="realtime-summary">--</dd>
+              </dl>
+            </section>
+          </div>
+
+          <section class="tradebar">
+            <div class="trade-controls">
+              <label class="toggle">
+                <input id="execute" type="checkbox" />
+                <span>Allow real trade request</span>
+              </label>
+              <input id="confirm" class="confirm" type="text" placeholder="CONFIRM" autocomplete="off" />
+              <button id="trade" class="danger" disabled>Trade</button>
+            </div>
+            <pre id="trade-output">{ "status": "no_op" }</pre>
+          </section>
+        </section>
+      </section>
+    </main>
+    <script src="/static/app.js"></script>
+  </body>
+</html>
