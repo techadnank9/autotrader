@@ -4,7 +4,10 @@ import argparse
 import json
 from decimal import Decimal, InvalidOperation
 
+from ai_trader.agent_runtime import PortfolioAgentRegistry
 from ai_trader.config import Settings
+from ai_trader.market_research import MarketResearchService
+from ai_trader.replay import ReplayStore, YahooEODPriceProvider
 from ai_trader.robinhood import RobinhoodTrader, print_query_result
 
 
@@ -64,6 +67,34 @@ def parse_args() -> argparse.Namespace:
     )
 
     subparsers.add_parser("doctor", help="Inspect Codex and Robinhood MCP readiness.")
+
+    replay_parser = subparsers.add_parser("replay-build", help="Label manage runs and export a SIA replay dataset.")
+    replay_parser.add_argument(
+        "--task-dir",
+        default="sia_tasks/portfolio-management-replay",
+        help="Output task directory for SIA replay data.",
+    )
+
+    market_parser = subparsers.add_parser("market-collect", help="Collect the daily top-universe market snapshot for replay learning.")
+    market_parser.add_argument("--force", action="store_true", help="Refresh today's snapshot even if one is already cached.")
+
+    subparsers.add_parser("agents-list", help="List active and eligible portfolio-manager versions.")
+
+    activate_parser = subparsers.add_parser("agents-activate", help="Activate a passed portfolio-manager version.")
+    activate_parser.add_argument("version_id")
+
+    subparsers.add_parser("agents-rollback", help="Rollback to the previously active portfolio-manager version.")
+
+    register_parser = subparsers.add_parser(
+        "agents-register",
+        help="Register a SIA-generated portfolio-manager artifact so it becomes selectable in the app.",
+    )
+    register_parser.add_argument("version_id")
+    register_parser.add_argument("target_agent_path")
+    register_parser.add_argument("--label", default=None, help="Human-friendly label for the generated manager.")
+    register_parser.add_argument("--source-run", default="manual", help="SIA run identifier or source label.")
+    register_parser.add_argument("--status", choices=["passed", "pending", "failed"], default="passed")
+    register_parser.add_argument("--metrics-json", default="{}", help="JSON object with evaluation metrics.")
     return parser.parse_args()
 
 
@@ -95,6 +126,56 @@ def main() -> int:
 
         if args.command == "doctor":
             print(json.dumps(trader.doctor(), indent=2))
+            return 0
+
+        if args.command == "replay-build":
+            replay = ReplayStore(settings.replay_log_dir)
+            market = MarketResearchService(settings, replay)
+            snapshot = market.collect_daily_snapshot()
+            replay.build_labels(YahooEODPriceProvider())
+            market_labels = market.build_labels()
+            exported = replay.export_sia_replay_dataset(args.task_dir)
+            print(json.dumps({**exported, "market_snapshot_id": snapshot.get("snapshot_id"), "market_labels": len(market_labels)}, indent=2))
+            return 0
+
+        if args.command == "market-collect":
+            replay = ReplayStore(settings.replay_log_dir)
+            market = MarketResearchService(settings, replay)
+            print(json.dumps(market.collect_daily_snapshot(force=args.force), indent=2))
+            return 0
+
+        if args.command == "agents-list":
+            registry = PortfolioAgentRegistry(settings.portfolio_agent_dir)
+            print(json.dumps(registry.list_agents(), indent=2))
+            return 0
+
+        if args.command == "agents-activate":
+            registry = PortfolioAgentRegistry(settings.portfolio_agent_dir)
+            print(json.dumps(registry.activate(args.version_id), indent=2))
+            return 0
+
+        if args.command == "agents-rollback":
+            registry = PortfolioAgentRegistry(settings.portfolio_agent_dir)
+            print(json.dumps(registry.rollback(), indent=2))
+            return 0
+
+        if args.command == "agents-register":
+            registry = PortfolioAgentRegistry(settings.portfolio_agent_dir)
+            try:
+                metrics = json.loads(args.metrics_json)
+            except json.JSONDecodeError as exc:
+                raise ValueError("--metrics-json must be valid JSON.") from exc
+            if not isinstance(metrics, dict):
+                raise ValueError("--metrics-json must decode to a JSON object.")
+            manifest = registry.register_sia_generation(
+                version_id=args.version_id,
+                source_target_agent=args.target_agent_path,
+                metrics=metrics,
+                label=args.label or args.version_id,
+                source_run=args.source_run,
+                status=args.status,
+            )
+            print(json.dumps(manifest.to_dict(), indent=2))
             return 0
 
         if args.command == "query":

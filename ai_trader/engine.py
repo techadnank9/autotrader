@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 from urllib import error, request
+from urllib.parse import urlencode
 
+from ai_trader.brightdata_api import collect_stock_evidence
 from ai_trader.config import Settings
 from ai_trader.utils import money_string
 
@@ -54,25 +57,15 @@ class BrightDataClient:
     def enabled(self) -> bool:
         return bool(self.settings.bright_data_api_key)
 
-    def collect(self, symbols: list[str]) -> dict[str, Any]:
+    def collect(self, symbols: list[str], *, max_symbols: int | None = None) -> dict[str, Any]:
+        selected = symbols if max_symbols is None else symbols[:max_symbols]
         if not self.enabled:
-            return self._demo_context(symbols)
+            return self._demo_context(selected)
 
-        return {
-            "mode": "bright_data",
-            "reddit": self._discover(
-                f"Reddit stock discussion latest news {' '.join(symbols[:4])}",
-                source="reddit",
-            ),
-            "x": self._discover(
-                f"X Twitter stock market latest news {' '.join(symbols[:4])}",
-                source="x",
-            ),
-            "realtime": self._discover(
-                f"{' '.join(symbols[:4])} latest earnings news realtime stock market",
-                source="realtime",
-            ),
-        }
+        return collect_stock_evidence(
+            selected,
+            fetcher=lambda query, source: self._discover(query, source=source),
+        )
 
     def _discover(self, query: str, *, source: str) -> dict[str, Any]:
         payload = {
@@ -81,6 +74,7 @@ class BrightDataClient:
             "language": "en",
             "country": "US",
             "format": "json",
+            "num_results": 8,
         }
         req = request.Request(
             self.settings.bright_data_endpoint,
@@ -94,14 +88,70 @@ class BrightDataClient:
         try:
             with request.urlopen(req, timeout=45) as resp:
                 raw = resp.read().decode("utf-8", errors="replace")
-        except (error.HTTPError, error.URLError, TimeoutError) as exc:
+        except error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:2000]
+            return {
+                "source": source,
+                "query": query,
+                "ok": False,
+                "status_code": exc.code,
+                "error": str(exc),
+                "detail": detail,
+                "items": [],
+            }
+        except (error.URLError, TimeoutError) as exc:
             return {"source": source, "query": query, "ok": False, "error": str(exc), "items": []}
 
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError:
-            parsed = {"raw": raw[:4000]}
+        parsed = _parse_json(raw)
+        task_id = parsed.get("task_id") if isinstance(parsed, dict) else None
+        if task_id:
+            return self._poll_discover_task(task_id, query=query, source=source)
         return {"source": source, "query": query, "ok": True, "items": parsed}
+
+    def _poll_discover_task(self, task_id: str, *, query: str, source: str) -> dict[str, Any]:
+        last_payload: dict[str, Any] = {}
+        for _ in range(12):
+            payload = self._get_discover_result(task_id)
+            last_payload = payload
+            if payload.get("status") == "done":
+                return {
+                    "source": source,
+                    "query": query,
+                    "ok": True,
+                    "task_id": task_id,
+                    "items": payload,
+                }
+            time.sleep(1)
+        return {
+            "source": source,
+            "query": query,
+            "ok": False,
+            "task_id": task_id,
+            "error": "Bright Data Discover task did not finish before timeout.",
+            "items": last_payload,
+        }
+
+    def _get_discover_result(self, task_id: str) -> dict[str, Any]:
+        separator = "&" if "?" in self.settings.bright_data_endpoint else "?"
+        url = f"{self.settings.bright_data_endpoint}{separator}{urlencode({'task_id': task_id})}"
+        req = request.Request(
+            url,
+            headers={"Authorization": f"Bearer {self.settings.bright_data_api_key}"},
+            method="GET",
+        )
+        try:
+            with request.urlopen(req, timeout=45) as resp:
+                raw = resp.read().decode("utf-8", errors="replace")
+        except error.HTTPError as exc:
+            return {
+                "status": "error",
+                "status_code": exc.code,
+                "error": str(exc),
+                "detail": exc.read().decode("utf-8", errors="replace")[:2000],
+            }
+        except (error.URLError, TimeoutError) as exc:
+            return {"status": "error", "error": str(exc)}
+        return _parse_json(raw)
 
     def _demo_context(self, symbols: list[str]) -> dict[str, Any]:
         return {
@@ -203,7 +253,7 @@ Return valid JSON only:
             "recommendation": {
                 "decision": "buy" if pool else "no_trade",
                 "symbol": pool[0]["symbol"] if pool else None,
-                "dollar_amount": float(min(request_model.budget, Decimal("5"))),
+                "dollar_amount": float(request_model.budget),
                 "confidence": 0.58,
                 "rationale": "Fallback recommendation generated because the Codex analysis call did not complete cleanly.",
                 "risks": ["Validate tradability and quote context before any live order.", stderr[:180] if stderr else "No stderr."],
@@ -245,7 +295,47 @@ class RecommendationEngine:
             "pool_size": request_model.pool_size,
             "trade_default": "no_op",
         }
+        result["reasoning_trace"] = self._build_reasoning_trace(request_model, context, result)
         return result
+
+    def _build_reasoning_trace(
+        self,
+        request_model: AnalysisRequest,
+        context: dict[str, Any],
+        result: dict[str, Any],
+    ) -> list[dict[str, str]]:
+        weights = request_model.weights.normalized()
+        recommendation = result.get("recommendation") or {}
+        pool = result.get("pool") or []
+        top_pool = ", ".join(item.get("symbol", "--") for item in pool[: min(len(pool), 3)]) or "none"
+        source_summary = result.get("source_summary") or {}
+        return [
+            {
+                "stage": "budget",
+                "title": "Budget and pool",
+                "detail": f"Budget ${money_string(request_model.budget)} across {request_model.pool_size} ranked names.",
+            },
+            {
+                "stage": "weights",
+                "title": "Source weighting",
+                "detail": f"Normalized weights Reddit {weights.reddit:.2f}, X {weights.x:.2f}, realtime {weights.realtime:.2f}.",
+            },
+            {
+                "stage": "context",
+                "title": "Evidence mode",
+                "detail": f"Context mode {context.get('mode', 'bright_data')}. Reddit: {source_summary.get('reddit', '--')}",
+            },
+            {
+                "stage": "ranking",
+                "title": "Ranked pool",
+                "detail": f"Top ranked symbols: {top_pool}.",
+            },
+            {
+                "stage": "decision",
+                "title": "Recommendation",
+                "detail": f"Decision {recommendation.get('decision', 'blocked')} on {recommendation.get('symbol', '--')} for ${money_string(_to_decimal(recommendation.get('dollar_amount', 0)))}.",
+            },
+        ]
 
     def _normalize_allocations(
         self,
@@ -260,9 +350,14 @@ class RecommendationEngine:
         scores = [max(_to_decimal(item.get("score")), Decimal("0")) for item in pool]
         total_score = sum(scores)
         if total_score <= 0:
-            equal = (request_model.budget / Decimal(len(pool))).quantize(Decimal("0.01"))
-            for item in pool:
-                item["allocation_usd"] = float(equal)
+            remaining = request_model.budget
+            for index, item in enumerate(pool):
+                if index == len(pool) - 1:
+                    allocation = max(remaining, Decimal("0"))
+                else:
+                    allocation = (request_model.budget / Decimal(len(pool))).quantize(Decimal("0.01"))
+                    remaining -= allocation
+                item["allocation_usd"] = float(allocation)
             return result
 
         remaining = request_model.budget
@@ -276,7 +371,11 @@ class RecommendationEngine:
         return result
 
     def trade_prompt(self, recommendation: dict[str, Any], execute: bool) -> dict[str, Any]:
-        return self.trade(recommendation, execute=execute, confirm_phrase="")
+        return self.trade(
+            recommendation,
+            execute=execute,
+            confirm_phrase="CONFIRM" if execute else "",
+        )
 
     def trade(
         self,
@@ -316,6 +415,12 @@ Review and place exactly one long-only U.S. equity buy order:
 - Symbol: {symbol}
 - Dollar amount: ${money_string(amount)}
 
+Workflow requirements:
+- First review the exact order details.
+- If the review step asks for explicit confirmation to place this exact order, reply with `CONFIRM` and continue in the same run.
+- Do not stop after returning a review preview.
+- Complete the placement attempt unless Robinhood blocks the order.
+
 Do not use options, crypto, margin, leverage, shorts, OTC, inverse ETFs, or leveraged ETFs.
 Return valid JSON only with status, symbol, dollar_amount, order_id, and warnings.
 """.strip()
@@ -351,3 +456,11 @@ def _to_decimal(value: Any) -> Decimal:
         return Decimal(str(value))
     except Exception:
         return Decimal("0")
+
+
+def _parse_json(raw: str) -> dict[str, Any]:
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return {"raw": raw[:4000]}
+    return parsed if isinstance(parsed, dict) else {"items": parsed}

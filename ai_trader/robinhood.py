@@ -19,6 +19,8 @@ from ai_trader.prompts import (
     direct_search_prompt,
     launcher_note,
     live_prompt,
+    portfolio_execution_prompt,
+    portfolio_snapshot_prompt,
     preview_prompt,
     recommendation_prompt,
 )
@@ -79,6 +81,57 @@ class RobinhoodTrader:
             stdout=result.stdout,
             stderr=result.stderr,
         )
+
+    def run_json_prompt(self, prompt: str, *, timeout: int = 240) -> dict[str, Any]:
+        result = subprocess.run(
+            self._build_exec_codex_command(prompt),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+        final_text = self._extract_final_agent_text(result.stdout)
+        if result.returncode == 0 and final_text:
+            try:
+                return json.loads(final_text)
+            except json.JSONDecodeError:
+                return {"status": "failed", "message": "Unparseable JSON response.", "raw": final_text}
+        return {
+            "status": "failed",
+            "message": "Codex did not return a usable final JSON response.",
+            "stderr": result.stderr[-1200:],
+            "stdout": result.stdout[-1200:],
+            "returncode": result.returncode,
+        }
+
+    def fetch_portfolio_snapshot(self, symbols: list[str]) -> dict[str, Any]:
+        prompt = portfolio_snapshot_prompt(symbols)
+        snapshot = self.run_json_prompt(prompt, timeout=240)
+        if snapshot.get("status") == "failed":
+            return {
+                "agentic_account": {"account_id": None, "account_number_masked": None},
+                "portfolio": {"total_value": 0, "buying_power": 0, "cash_available": 0},
+                "positions": [],
+                "quotes": {},
+                "tradability": {},
+                "recent_orders": [],
+                "warnings": [snapshot.get("message", "Snapshot capture failed.")],
+                "raw_error": snapshot,
+            }
+        return snapshot
+
+    def execute_management_plan(self, plan: dict[str, Any]) -> dict[str, Any]:
+        actions = plan.get("ordered_actions") or plan.get("actions") or []
+        if not actions:
+            return {
+                "status": "no_op",
+                "summary": "No actionable portfolio changes were generated.",
+                "reviewed_orders": [],
+                "placed_orders": [],
+                "skipped_orders": [],
+                "warnings": plan.get("warnings", []),
+            }
+        return self.run_json_prompt(portfolio_execution_prompt(plan), timeout=360)
 
     def doctor(self) -> dict[str, Any]:
         codex_path = shutil.which(self.settings.codex_bin)

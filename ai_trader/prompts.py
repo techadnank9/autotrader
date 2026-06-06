@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from decimal import Decimal
 
 from ai_trader.utils import money_string
@@ -97,5 +98,116 @@ Call `search` for {query} and return only JSON:
 {{
   "query": "{query}",
   "results": []
+}}
+""".strip()
+
+
+def portfolio_snapshot_prompt(symbols: list[str]) -> str:
+    joined = ", ".join(symbols) if symbols else "AAPL, MSFT, NVDA"
+    return f"""
+Use the `robinhood-trading` MCP only.
+
+Collect one account snapshot for autonomous portfolio management:
+1. Call `get_accounts`
+2. Identify the Robinhood Agentic account that can place trades
+3. Call `get_portfolio`
+4. Call `get_equity_positions`
+5. Call `get_equity_orders`
+6. Call `get_equity_quotes` for these symbols: {joined}
+7. Call `get_equity_tradability` for these symbols: {joined}
+
+Return valid JSON only:
+{{
+  "agentic_account": {{
+    "account_id": "string or null",
+    "account_number_masked": "string or null"
+  }},
+  "portfolio": {{
+    "total_value": number,
+    "buying_power": number,
+    "cash_available": number
+  }},
+  "positions": [
+    {{
+      "symbol": "string",
+      "quantity": number,
+      "market_value": number,
+      "cost_basis": number,
+      "current_price": number
+    }}
+  ],
+  "quotes": {{
+    "AAPL": {{
+      "last_trade_price": number,
+      "previous_close": number
+    }}
+  }},
+  "tradability": {{
+    "AAPL": {{
+      "tradeable": true,
+      "fractional_tradability": true
+    }}
+  }},
+  "recent_orders": [
+    {{
+      "symbol": "string",
+      "side": "buy" | "sell",
+      "status": "string",
+      "submitted_at": "ISO timestamp or null",
+      "filled_at": "ISO timestamp or null"
+    }}
+  ],
+  "warnings": ["warning or empty if none"]
+}}
+""".strip()
+
+
+def portfolio_execution_prompt(plan: dict[str, object]) -> str:
+    serialized = json.dumps(plan, indent=2)[:16000]
+    return f"""
+Use the `robinhood-trading` MCP only.
+
+Execute exactly one autonomous portfolio-management pass for this reviewed plan:
+{serialized}
+
+Rules:
+- Long U.S. equities only.
+- Process sells before buys.
+- For `exit`, sell the full position quantity if needed.
+- For `trim`, reduce the position by approximately the planned dollar amount using a supported review/place flow.
+- For `buy`, use the planned dollar amount.
+- Review every order first.
+- If Robinhood asks for explicit confirmation to place a reviewed order, reply with `CONFIRM` and continue in the same run.
+- Skip any unsupported or unsafe order instead of improvising.
+- Stop after the full plan has been attempted once.
+
+Return valid JSON only:
+{{
+  "status": "submitted" | "blocked" | "no_op" | "failed",
+  "reviewed_orders": [
+    {{
+      "symbol": "string",
+      "side": "buy" | "sell",
+      "requested_dollar_amount": number,
+      "summary": "short paragraph"
+    }}
+  ],
+  "placed_orders": [
+    {{
+      "symbol": "string",
+      "side": "buy" | "sell",
+      "dollar_amount": number,
+      "order_id": "string or null"
+    }}
+  ],
+  "skipped_orders": [
+    {{
+      "symbol": "string",
+      "side": "buy" | "sell",
+      "reason": "short reason"
+    }}
+  ],
+  "warnings": ["warning or empty if none"],
+  "summary": "short paragraph"
 }}
 """.strip()

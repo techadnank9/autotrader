@@ -3,103 +3,288 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>AI Trader</title>
+    <title>YOLO STREET</title>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" />
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
-    <main class="shell">
-      <section class="workspace">
-        <aside class="rail">
-          <div>
-            <p class="eyebrow">Robinhood MCP</p>
-            <h1>AI Trader</h1>
-          </div>
-
-          <label class="field">
-            <span>Budget</span>
-            <input id="budget" type="number" min="1" max="5" step="0.01" value="5" />
-          </label>
-
-          <label class="field">
-            <span>Pool size</span>
-            <input id="pool-size" type="number" min="1" max="10" step="1" value="5" />
-          </label>
-
-          <div class="weights">
-            <div class="section-label">Source weights</div>
-            <label>
-              <span>Reddit <strong id="reddit-label">35</strong></span>
-              <input id="reddit" type="range" min="0" max="100" value="35" />
-            </label>
-            <label>
-              <span>X <strong id="x-label">25</strong></span>
-              <input id="x" type="range" min="0" max="100" value="25" />
-            </label>
-            <label>
-              <span>Realtime <strong id="realtime-label">40</strong></span>
-              <input id="realtime" type="range" min="0" max="100" value="40" />
-            </label>
-          </div>
-
-          <button id="analyze" class="primary">Analyze</button>
-        </aside>
-
-        <section class="main">
-          <header class="topline">
-            <div>
-              <p class="eyebrow">Default execution</p>
-              <h2>No-op until confirmed</h2>
-            </div>
-            <div id="status" class="status">Idle</div>
-          </header>
-
-          <div class="recommendation">
-            <div class="symbol" id="symbol">--</div>
-            <div>
-              <p id="decision">Run analysis to build a pool.</p>
-              <p id="rationale" class="muted">Bright Data context and Codex ranking will appear here.</p>
+    <main class="app-shell">
+      <aside class="side-column">
+        <div class="brand-block">
+          <p class="eyebrow">Agentic Portfolio Platform</p>
+          <div class="brand-lockup">
+            <h1>YOLO</h1>
+            <div class="brand-mark" aria-hidden="true">
+              <span></span>
+              <span></span>
+              <span></span>
             </div>
           </div>
+          <p class="side-copy">
+            A high-conviction portfolio management workspace with live Robinhood account context, controlled autonomous execution,
+            and an SIA improvement loop that refines the same decision engine offline.
+          </p>
+        </div>
 
-          <div class="grid">
-            <section class="panel pool-panel">
-              <div class="section-label">Candidate pool</div>
-              <div class="table">
-                <div class="row head">
-                  <span>Symbol</span>
-                  <span>Score</span>
-                  <span>Allocation</span>
-                  <span>Reason</span>
+        <section class="side-section">
+          <p class="section-label">Runtime</p>
+          <div class="mini-stack">
+            <div class="mini-row">
+              <span class="mini-label">Status</span>
+              <span id="status" class="mini-value">Idle</span>
+            </div>
+            <div class="mini-row">
+              <span class="mini-label">Mode</span>
+              <span id="mode" class="mini-value muted">Snapshot loading</span>
+            </div>
+            <div class="mini-row">
+              <span class="mini-label">Active agent</span>
+              <span id="active-agent" class="mini-value">builtin-default-v1</span>
+            </div>
+          </div>
+        </section>
+
+        <section class="side-section compact">
+          <p class="section-label">Operating Policy</p>
+          <p class="side-note">The live manager can buy, hold, trim, exit, or return `no_trade` based on current account state and policy constraints.</p>
+          <p class="side-note">SIA replays and evaluates the same contract offline before any new portfolio agent is promoted into live use.</p>
+        </section>
+      </aside>
+
+      <section class="canvas">
+        <div class="tab-shell">
+          <div class="tab-bar" role="tablist" aria-label="Workspace Tabs">
+            <button id="tab-portfolio" class="tab-button active" data-tab="portfolio" role="tab" aria-selected="true">Portfolio</button>
+            <button id="tab-sia" class="tab-button" data-tab="sia" role="tab" aria-selected="false">SIA Lab</button>
+          </div>
+
+          <section id="panel-portfolio" class="tab-panel active" data-tab-panel="portfolio" role="tabpanel">
+            <section class="poster">
+              <div class="poster-copy">
+                <p class="eyebrow">Live Account Snapshot</p>
+                <h2 id="snapshot-total-equity">$0.00</h2>
+                <p id="poster-summary" class="poster-summary">
+                  Load the live Robinhood account, inspect current exposure, then run a single autonomous portfolio-management pass through the active agent.
+                </p>
+              </div>
+
+              <div class="poster-side">
+                <div class="signal-block">
+                  <span class="signal-label">Buying power</span>
+                  <span id="snapshot-buying-power" class="signal-value">$0.00</span>
                 </div>
-                <div id="pool"></div>
+                <div class="signal-block">
+                  <span class="signal-label">Cash available</span>
+                  <span id="snapshot-cash" class="signal-value">$0.00</span>
+                </div>
+                <div class="signal-block">
+                  <span class="signal-label">Agentic account</span>
+                  <span id="snapshot-account" class="signal-value">--</span>
+                </div>
               </div>
             </section>
 
-            <section class="panel">
-              <div class="section-label">Signals</div>
-              <dl class="signals">
-                <dt>Reddit</dt>
-                <dd id="reddit-summary">--</dd>
-                <dt>X</dt>
-                <dd id="x-summary">--</dd>
-                <dt>Realtime</dt>
-                <dd id="realtime-summary">--</dd>
-              </dl>
+            <section class="summary-strip">
+              <div class="summary-item">
+                <span class="summary-label">Decision</span>
+                <span id="latest-decision" class="summary-value">No run yet</span>
+              </div>
+              <div class="summary-item">
+                <span class="summary-label">Execution</span>
+                <span id="latest-execution" class="summary-value">idle</span>
+              </div>
+              <div class="summary-item">
+                <span class="summary-label">Latest risk</span>
+                <span id="latest-risk" class="summary-value">Snapshot first</span>
+              </div>
             </section>
-          </div>
 
-          <section class="tradebar">
-            <div class="trade-controls">
-              <label class="toggle">
-                <input id="execute" type="checkbox" />
-                <span>Allow real trade request</span>
-              </label>
-              <input id="confirm" class="confirm" type="text" placeholder="CONFIRM" autocomplete="off" />
-              <button id="trade" class="danger" disabled>Trade</button>
-            </div>
-            <pre id="trade-output">{ "status": "no_op" }</pre>
+            <section class="workspace-block manage-console">
+              <div class="panel-head manage-console-head">
+                <div>
+                  <p class="section-label">Autonomous Pass</p>
+                  <p class="panel-copy">Run one controlled management pass against the current account snapshot. The active agent can rebalance, add exposure, de-risk, or stand down.</p>
+                </div>
+              </div>
+
+              <div class="manage-console-grid">
+                <div class="manage-agent-stack">
+                  <label class="toggle manage-toggle">
+                    <input id="use-active-agent" type="checkbox" checked />
+                    <span>Use active portfolio agent</span>
+                  </label>
+
+                  <div class="agent-switcher">
+                    <label class="section-label" for="portfolio-agent-select">Execution Agent</label>
+                    <div class="agent-switcher-row">
+                      <select id="portfolio-agent-select" class="compact-input"></select>
+                      <button id="portfolio-activate-agent" class="secondary">Activate agent</button>
+                    </div>
+                    <p id="portfolio-agent-meta" class="manage-note">
+                      Built-in and SIA-generated portfolio agents can both be activated here for live execution.
+                    </p>
+                  </div>
+                </div>
+
+                <div class="manage-actions">
+                  <button id="manage-portfolio" class="primary">Manage portfolio</button>
+                  <button id="refresh-portfolio" class="secondary">Refresh snapshot</button>
+                </div>
+
+                <p class="manage-note">
+                  The active agent can be changed here or in SIA Lab. Turning this off forces the built-in manager for direct comparison.
+                </p>
+              </div>
+            </section>
+
+            <section class="portfolio-grid">
+              <section class="workspace-block">
+                <div class="panel-head">
+                  <div>
+                    <p class="section-label">Current Positions</p>
+                    <p class="panel-copy">Current holdings from the latest Robinhood snapshot, shown as the live operating book.</p>
+                  </div>
+                </div>
+
+                <div class="table">
+                  <div class="row head positions-head">
+                    <span>Symbol</span>
+                    <span>Quantity</span>
+                    <span>Market value</span>
+                    <span>Price</span>
+                  </div>
+                  <div id="holdings"></div>
+                </div>
+
+                <div id="snapshot-warnings" class="warning-list"></div>
+              </section>
+
+              <aside class="inspector-column">
+                <section class="workspace-block">
+                  <div class="panel-head">
+                    <div>
+                      <p class="section-label">Latest Agent Plan</p>
+                      <p class="panel-copy">The active manager decides buy, trim, exit, hold, or `no_trade` and leaves the resulting execution blueprint here.</p>
+                    </div>
+                  </div>
+
+                  <p id="latest-summary" class="lead-copy">No autonomous pass has been run yet.</p>
+                  <div id="latest-actions" class="action-list"></div>
+                </section>
+
+                <section class="workspace-block">
+                  <div class="panel-head">
+                    <div>
+                      <p class="section-label">Reasoning Trace</p>
+                      <p class="panel-copy">Compact trace of the latest account read, ranking pass, portfolio decision, and execution outcome.</p>
+                    </div>
+                  </div>
+                  <div id="manage-trace" class="trace-list"></div>
+                </section>
+              </aside>
+            </section>
+
+            <section class="workspace-block raw-block">
+              <div class="panel-head">
+                <div>
+                  <p class="section-label">Raw Management Output</p>
+                  <p class="panel-copy">The full portfolio-management payload from the latest autonomous run, preserved without compression.</p>
+                </div>
+              </div>
+              <pre id="manage-output">{ "status": "idle" }</pre>
+            </section>
           </section>
-        </section>
+
+          <section id="panel-sia" class="tab-panel" data-tab-panel="sia" role="tabpanel" hidden>
+            <section class="poster sia-poster">
+              <div class="poster-copy">
+                <p class="eyebrow">Offline Evolution</p>
+                <h2>SIA Lab</h2>
+                <p class="poster-summary">
+                  Replay export and SIA runs evolve the same portfolio manager used in live execution. Active manager:
+                  <span id="sia-active-agent">builtin-default-v1</span>.
+                </p>
+              </div>
+
+              <div class="poster-side">
+                <div class="signal-block">
+                  <span class="signal-label">SIA runtime</span>
+                  <span id="sia-status" class="signal-value">Unavailable</span>
+                </div>
+                <div class="signal-block">
+                  <span class="signal-label">Max generations</span>
+                  <input id="sia-max-gen" class="compact-input" type="number" min="1" max="20" value="1" />
+                </div>
+              </div>
+            </section>
+
+            <section class="summary-strip control-strip">
+              <div class="summary-item">
+                <span class="summary-label">Replay builder</span>
+                <button id="sia-build" class="secondary wide">Build replay dataset</button>
+              </div>
+              <div class="summary-item">
+                <span class="summary-label">Generation run</span>
+                <button id="sia-run" class="primary wide">Run SIA</button>
+              </div>
+              <div class="summary-item">
+                <span class="summary-label">Rollback</span>
+                <button id="rollback-agent" class="secondary wide" disabled>Rollback active agent</button>
+              </div>
+            </section>
+
+            <section class="workspace-block sia-debrief-block">
+              <div class="panel-head">
+                <div>
+                  <p class="section-label">Run Debrief</p>
+                  <p class="panel-copy">A concise readout of what the latest SIA generation missed, what improved, and which live agent version came out of the run.</p>
+                </div>
+              </div>
+              <div id="sia-summary-card" class="sia-summary-card">
+                <p class="agent-line">Run SIA to generate a new portfolio-agent debrief.</p>
+              </div>
+            </section>
+
+            <section class="portfolio-grid">
+              <section class="workspace-block">
+                <div class="panel-head">
+                  <div>
+                    <p class="section-label">Eligible Portfolio Agents</p>
+                    <p class="panel-copy">Offline candidates can be activated here and then reused by the live portfolio page.</p>
+                  </div>
+                </div>
+
+                <div class="agent-meta">
+                  <p class="agent-line">Current: <span id="agent-current">builtin-default-v1</span></p>
+                  <p class="agent-line">Previous: <span id="agent-previous">--</span></p>
+                </div>
+                <div id="agent-list" class="agent-list"></div>
+              </section>
+
+              <aside class="inspector-column">
+                <section class="workspace-block">
+                  <div class="panel-head">
+                    <div>
+                      <p class="section-label">SIA Trace</p>
+                      <p class="panel-copy">Replay export and generation stages render here.</p>
+                    </div>
+                  </div>
+                  <div id="sia-trace" class="trace-list"></div>
+                </section>
+
+                <section class="workspace-block raw-block">
+                  <div class="panel-head">
+                    <div>
+                      <p class="section-label">Raw SIA JSON</p>
+                      <p class="panel-copy">The full replay-build or SIA-run payload is preserved here for inspection.</p>
+                    </div>
+                  </div>
+                  <pre id="sia-output">{ "status": "idle" }</pre>
+                </section>
+              </aside>
+            </section>
+          </section>
+        </div>
       </section>
     </main>
     <script src="/static/app.js"></script>

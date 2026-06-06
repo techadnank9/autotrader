@@ -6,12 +6,15 @@ A FastAPI app and CLI that use Codex, Bright Data, and Robinhood's official Trad
 2. Keep the order size at or below `$5`.
 3. Weight Reddit, X, and realtime context.
 4. Keep Robinhood execution defaulted to no-op unless explicitly confirmed.
+5. Run a one-click autonomous portfolio-management pass against the Robinhood Agentic account.
+6. Log replay data for offline SIA evaluation and manual portfolio-agent activation.
 
 This project is intentionally conservative. It defaults to a single-ticker, long-only flow and separates:
 
 - `recommend`: generate one idea
 - `preview`: simulate the order
 - `live`: launch Codex and require explicit `CONFIRM` before placing an order
+- `manage portfolio`: inspect balances, positions, news context, then decide buy / hold / trim / exit in one pass
 - `server`: run the FastAPI UI at `http://127.0.0.1:8000`
 
 ## Why this shape
@@ -33,11 +36,16 @@ In testing here, Robinhood MCP tool calls were getting cancelled in non-interact
 - `ai_trader/cli.py`: CLI entrypoint
 - `ai_trader/server.py`: FastAPI app
 - `ai_trader/engine.py`: Bright Data collection, Codex ranking, trade guardrails
+- `ai_trader/portfolio_engine.py`: account-aware portfolio-management pass
+- `ai_trader/portfolio.py`: default buy / hold / trim / exit planner
+- `ai_trader/agent_runtime.py`: active portfolio-agent registry and rollback support
+- `ai_trader/replay.py`: management-run logs, next-day labels, SIA replay export
 - `ai_trader/robinhood.py`: Codex launch orchestration
 - `ai_trader/prompts.py`: Codex trading prompts
 - `ai_trader/static/`: browser UI
 - `ai_trader/config.py`: env loading
-- `tests/`: small smoke tests for prompts and launch plans
+- `sia_tasks/portfolio-management-replay/`: replay task scaffold for offline SIA scoring
+- `tests/`: smoke and unit coverage for prompts, server routes, portfolio planning, replay, and agent activation
 
 ## Setup
 
@@ -64,6 +72,13 @@ DEFAULT_BUDGET_USD=5
 BRIGHT_DATA_API_KEY=
 BRIGHT_DATA_ZONE=serp_api1
 BRIGHT_DATA_ENDPOINT=https://api.brightdata.com/discover
+REPLAY_LOG_DIR=.ai_trader/replay
+PORTFOLIO_AGENT_DIR=.ai_trader/portfolio_agents
+PORTFOLIO_CASH_RESERVE_USD=5
+PORTFOLIO_MAX_POSITIONS=5
+PORTFOLIO_MAX_POSITION_PCT=0.45
+PORTFOLIO_MIN_TRADE_USD=5
+PORTFOLIO_CANDIDATE_POOL_SIZE=6
 ```
 
 ## Usage
@@ -82,6 +97,11 @@ PYTHONPATH=. venv/bin/python -m ai_trader run --mode preview --budget 5
 PYTHONPATH=. venv/bin/python -m ai_trader run --mode live --budget 5
 PYTHONPATH=. venv/bin/python -m ai_trader prompt --mode live --budget 5
 PYTHONPATH=. venv/bin/python -m ai_trader run --mode live --budget 5 --print-only
+PYTHONPATH=. venv/bin/python -m ai_trader replay-build --task-dir sia_tasks/portfolio-management-replay
+PYTHONPATH=. venv/bin/python -m ai_trader agents-list
+PYTHONPATH=. venv/bin/python -m ai_trader agents-register sia-gen-1 /path/to/target_agent.py --source-run run-7 --metrics-json '{"score":0.71,"sample_count":42}'
+PYTHONPATH=. venv/bin/python -m ai_trader agents-activate sia-gen-1
+PYTHONPATH=. venv/bin/python -m ai_trader agents-rollback
 ```
 
 `run` launches an interactive Codex session in your terminal.
@@ -95,6 +115,21 @@ PYTHONPATH=. venv/bin/python -m ai_trader run --mode live --budget 5 --print-onl
 `query --interactive` launches the same Robinhood MCP prompt in interactive Codex instead.
 
 `--print-only` prints the exact Codex command plus prompt without launching Codex.
+
+The web app now also exposes `Manage portfolio`, which:
+
+1. Reads the Agentic account snapshot.
+2. Pulls Bright Data context for held and candidate names.
+3. Ranks the opportunity set.
+4. Builds a buy / hold / trim / exit plan through the active portfolio agent.
+5. Reviews and attempts the plan in one autonomous pass.
+6. Logs the run for offline replay and SIA evaluation.
+
+The UI also exposes SIA controls:
+
+1. `Build replay dataset` labels logged management runs and exports the replay task data.
+2. `Run SIA` starts `sia run` against the local task when the `sia` binary is installed.
+3. Reasoning traces render for analysis, portfolio management, and SIA actions so you can inspect why each step happened.
 
 You can also run the direct file entrypoint from an editor:
 
@@ -110,6 +145,13 @@ python3 ai_trader/robinhood.py MSFT
 - `live`: Codex should recommend, review, then stop and wait for your explicit `CONFIRM` reply before using `place_equity_order`.
 - `POST /api/analyze`: builds a stock pool from budget, pool size, source weights, Bright Data context, and Codex ranking.
 - `POST /api/trade`: returns `no_op` by default; real execution requires `execute=true` and `confirm_phrase=CONFIRM`.
+- `POST /api/manage-portfolio`: runs one full autonomous management pass and logs the result to replay storage.
+- `GET /api/portfolio-agents`: lists the active manager, previous manager, and passed candidates.
+- `POST /api/portfolio-agents/activate`: switches the active portfolio manager immediately for the next request.
+- `POST /api/portfolio-agents/rollback`: swaps back to the previous active portfolio manager.
+- `GET /api/sia/status`: reports whether the `sia` binary and task assets are available.
+- `POST /api/sia/replay-build`: exports the replay dataset for the portfolio-management task.
+- `POST /api/sia/run`: triggers one local SIA run and returns stdout/stderr for inspection.
 
 The live mode is intentionally interactive because headless `codex exec` Robinhood MCP tool calls were canceling during testing in this environment.
 
@@ -133,13 +175,17 @@ Then, inside the launched Codex session:
 - No options, crypto, shorting, leverage, OTC, or penny-stock hunting in the prompt.
 - Live mode requires an explicit `CONFIRM` reply inside Codex before placement.
 - The model is told to prefer `no_trade` over forcing a weak trade.
+- Portfolio management remains long-only U.S. equities and avoids same-day round trips by default.
+- Passed SIA generations are manually activated; new generated code is not auto-promoted into production.
 
 ## Limitations
 
 - Bright Data uses demo context unless `BRIGHT_DATA_API_KEY` is set.
 - Real trade execution requires both the UI execution toggle and the exact `CONFIRM` phrase.
 - Recommendation quality depends on model reasoning plus Robinhood tool access.
-- This is not portfolio management software. It is a narrow example for a single small order.
+- SIA replay labeling uses next-day Yahoo EOD data and should be treated as offline evaluation, not brokerage truth.
+- The autonomous manager executes only when `Manage portfolio` is clicked; there is no scheduler in v1.
+- In this environment, `sia` may not be installed yet. The UI reports that explicitly and disables the run button until it is available on `PATH`.
 
 ## Doctor
 

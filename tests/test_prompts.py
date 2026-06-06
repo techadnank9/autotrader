@@ -3,7 +3,13 @@ import json
 import unittest
 
 from ai_trader.config import Settings
-from ai_trader.prompts import direct_search_prompt, live_prompt, recommendation_prompt
+from ai_trader.prompts import (
+    direct_search_prompt,
+    live_prompt,
+    portfolio_execution_prompt,
+    portfolio_snapshot_prompt,
+    recommendation_prompt,
+)
 from ai_trader.robinhood import RobinhoodTrader
 from tempfile import TemporaryDirectory
 
@@ -23,6 +29,17 @@ class PromptTests(unittest.TestCase):
         prompt = direct_search_prompt("AAPL")
         self.assertIn("Call `search` for AAPL", prompt)
         self.assertIn('"query": "AAPL"', prompt)
+
+    def test_portfolio_snapshot_prompt_mentions_account_calls(self) -> None:
+        prompt = portfolio_snapshot_prompt(["AAPL", "MSFT"])
+        self.assertIn("get_accounts", prompt)
+        self.assertIn("get_equity_positions", prompt)
+        self.assertIn("AAPL, MSFT", prompt)
+
+    def test_portfolio_execution_prompt_mentions_review_and_confirm(self) -> None:
+        prompt = portfolio_execution_prompt({"ordered_actions": [{"symbol": "AAPL", "action": "buy"}]})
+        self.assertIn("Review every order first", prompt)
+        self.assertIn("reply with `CONFIRM`", prompt)
 
     def test_extract_final_agent_text(self) -> None:
         with TemporaryDirectory() as tmpdir:
