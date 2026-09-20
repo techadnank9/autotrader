@@ -1,0 +1,9 @@
+{
+  "name": "portfolio-management-replay",
+  "description": "Replay logged Robinhood Agentic portfolio-management runs and score the plan against next-session forward returns.",
+  "entrypoint": "target_agent.py",
+  "data": "data/replay.jsonl",
+  "metric": "top1_accuracy",
+  "case_count": 0,
+  "generated_at": "2026-09-20T22:01:04.183859+00:00"
+}

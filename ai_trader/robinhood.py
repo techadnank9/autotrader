@@ -63,17 +63,24 @@ class RobinhoodTrader:
         return LaunchPlan(mode="query-exec", prompt=prompt, command=command)
 
     def launch(self, plan: LaunchPlan) -> int:
-        result = subprocess.run(plan.command, check=False)
+        try:
+            result = subprocess.run(plan.command, check=False)
+        except OSError as exc:
+            print(f"Could not launch Codex: {exc}")
+            return 1
         return result.returncode
 
     def run_query_capture(self, query: str) -> QueryRunResult:
         plan = self.build_search_exec_plan(query)
-        result = subprocess.run(
-            plan.command,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        try:
+            result = subprocess.run(
+                plan.command,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError as exc:
+            return QueryRunResult(returncode=1, final_text=None, stdout="", stderr=str(exc))
         final_text = self._extract_final_agent_text(result.stdout)
         return QueryRunResult(
             returncode=result.returncode,
@@ -83,13 +90,30 @@ class RobinhoodTrader:
         )
 
     def run_json_prompt(self, prompt: str, *, timeout: int = 240) -> dict[str, Any]:
-        result = subprocess.run(
-            self._build_exec_codex_command(prompt),
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=timeout,
-        )
+        try:
+            result = subprocess.run(
+                self._build_exec_codex_command(prompt),
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=timeout,
+            )
+        except FileNotFoundError:
+            return {
+                "status": "failed",
+                "message": f"Codex binary {self.settings.codex_bin!r} was not found on PATH.",
+                "stderr": "",
+                "stdout": "",
+                "returncode": -1,
+            }
+        except subprocess.TimeoutExpired:
+            return {
+                "status": "failed",
+                "message": f"Codex did not respond within {timeout}s.",
+                "stderr": "",
+                "stdout": "",
+                "returncode": -1,
+            }
         final_text = self._extract_final_agent_text(result.stdout)
         if result.returncode == 0 and final_text:
             try:
@@ -148,12 +172,16 @@ class RobinhoodTrader:
         }
 
     def _mcp_status(self) -> dict[str, Any]:
-        result = subprocess.run(
-            [self.settings.codex_bin, "mcp", "list"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        try:
+            result = subprocess.run(
+                [self.settings.codex_bin, "mcp", "list"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return {"configured": False, "status_line": str(exc)}
         if result.returncode != 0:
             return {
                 "configured": False,

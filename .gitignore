@@ -7,4 +7,6 @@ __pycache__/
 .mypy_cache/
 .DS_Store
 .ai_trader/
-runs/
+runs/sia_tasks/*/data/
+ai_trader/stock_evidence.json
+.claude/

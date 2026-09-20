@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: autotrader
+    runtime: python
+    plan: free
+    region: oregon
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn ai_trader.server:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.7"
+      # Codex is not installed on Render, so the deployed instance runs the
+      # research UI + fallback ranking only. It cannot place orders.
+      - key: MAX_BUDGET_USD
+        value: "5"
+      - key: DEFAULT_BUDGET_USD
+        value: "5"
+      - key: ENABLE_WEB_SEARCH
+        value: "true"
+      - key: PORTFOLIO_CASH_RESERVE_USD
+        value: "5"
+      - key: PORTFOLIO_MAX_POSITIONS
+        value: "5"
+      - key: PORTFOLIO_MAX_POSITION_PCT
+        value: "0.45"
+      - key: PORTFOLIO_MIN_TRADE_USD
+        value: "5"
+      - key: PORTFOLIO_CANDIDATE_POOL_SIZE
+        value: "6"
+      - key: BRIGHT_DATA_API_KEY
+        sync: false

@@ -184,7 +184,16 @@ class CodexLLM:
             "--json",
             prompt,
         ]
-        result = subprocess.run(command, capture_output=True, text=True, check=False, timeout=180)
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, check=False, timeout=180)
+        except FileNotFoundError:
+            return self._fallback_recommendation(
+                request_model,
+                context,
+                f"Codex binary {self.settings.codex_bin!r} was not found on PATH.",
+            )
+        except subprocess.TimeoutExpired:
+            return self._fallback_recommendation(request_model, context, "Codex analysis call timed out.")
         text = self._extract_final_text(result.stdout)
         if result.returncode == 0 and text:
             try:
@@ -424,19 +433,34 @@ Workflow requirements:
 Do not use options, crypto, margin, leverage, shorts, OTC, inverse ETFs, or leveraged ETFs.
 Return valid JSON only with status, symbol, dollar_amount, order_id, and warnings.
 """.strip()
-        result = subprocess.run(
-            [
-                self.settings.codex_bin,
-                "exec",
-                "--skip-git-repo-check",
-                "--json",
-                prompt,
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=240,
-        )
+        try:
+            result = subprocess.run(
+                [
+                    self.settings.codex_bin,
+                    "exec",
+                    "--skip-git-repo-check",
+                    "--json",
+                    prompt,
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=240,
+            )
+        except FileNotFoundError:
+            return {
+                "status": "blocked",
+                "message": f"Codex binary {self.settings.codex_bin!r} was not found on PATH, so no order was attempted.",
+                "symbol": symbol,
+                "dollar_amount": float(amount),
+            }
+        except subprocess.TimeoutExpired:
+            return {
+                "status": "failed",
+                "message": "Codex timed out before returning a trade response.",
+                "symbol": symbol,
+                "dollar_amount": float(amount),
+            }
         text = self.llm._extract_final_text(result.stdout)
         if text:
             try:

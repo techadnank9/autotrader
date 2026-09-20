@@ -38,6 +38,9 @@ In testing here, Robinhood MCP tool calls were getting cancelled in non-interact
 - `ai_trader/engine.py`: Bright Data collection, Codex ranking, trade guardrails
 - `ai_trader/portfolio_engine.py`: account-aware portfolio-management pass
 - `ai_trader/portfolio.py`: default buy / hold / trim / exit planner
+- `ai_trader/brightdata_api.py`: Bright Data evidence collection and normalization
+- `ai_trader/market_research.py`: daily top-universe snapshots and forward labels
+- `ai_trader/sia.py`: SIA task status, replay export, and run orchestration
 - `ai_trader/agent_runtime.py`: active portfolio-agent registry and rollback support
 - `ai_trader/replay.py`: management-run logs, next-day labels, SIA replay export
 - `ai_trader/robinhood.py`: Codex launch orchestration
@@ -166,6 +169,29 @@ Then, inside the launched Codex session:
 1. Let Codex inspect the Robinhood account and build the order preview.
 2. Review the suggested ticker and preview details.
 3. Type `CONFIRM` only if you want the order placed.
+
+## Deploy
+
+`render.yaml` is a Render blueprint. Point Render at this repo, and it builds with
+`pip install -r requirements.txt` and serves `uvicorn ai_trader.server:app` on `$PORT`.
+
+What the deployed instance can and cannot do:
+
+- It serves the UI, `/api/analyze`, `/api/manage-portfolio`, and the SIA replay endpoints.
+- It pulls real market data from Yahoo for the daily universe snapshot and forward labels.
+- It **cannot trade**. Codex is not installed on Render, so every Robinhood MCP call
+  degrades to the documented fallback: `fetch_portfolio_snapshot` returns an empty
+  account, ranking falls back to a neutral pool, and `/api/trade` returns `blocked`.
+- Live trading stays local, where `codex` and `codex mcp login robinhood-trading` exist.
+
+Set `BRIGHT_DATA_API_KEY` in the Render dashboard if you want real Bright Data context
+instead of the demo context.
+
+## Behavior without Codex installed
+
+Every Codex subprocess call is guarded. With no `codex` on `PATH` the app still runs:
+`doctor` reports `codex_found: false`, analysis returns the fallback ranking, portfolio
+management returns `no_trade` against an empty account, and no order is ever attempted.
 
 ## Guardrails
 
