@@ -193,6 +193,16 @@ Every Codex subprocess call is guarded. With no `codex` on `PATH` the app still 
 `doctor` reports `codex_found: false`, analysis returns the fallback ranking, portfolio
 management returns `no_trade` against an empty account, and no order is ever attempted.
 
+## Storage
+
+`DATABASE_URL` selects Postgres; without it the app uses JSON files, so local
+development needs no database. Both backends implement the same interface, so the
+approval gate behaves identically on either. `GET /api/config` reports which one
+is live as `storage_backend`.
+
+The hosted instance runs on a free Neon Postgres, because serverless `/tmp` is
+wiped on cold starts and accounts created there did not survive.
+
 ## Telegram approval loop
 
 The approval gate is a decision record, and the Telegram card is one delivery
