@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sign in — AI Trader</title>
+<meta name="theme-color" content="#08090B">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/app.css">
+<style>
+  .wrap{min-height:100vh;display:grid;grid-template-columns:1fr 1fr}
+  .aside{padding:48px;border-right:1px solid var(--line);display:flex;flex-direction:column;justify-content:space-between;background:var(--surface)}
+  .aside h2{font-size:clamp(1.8rem,2.6vw,2.5rem);max-width:15ch;margin-top:auto}
+  .aside p{margin-top:18px;color:var(--text-2);max-width:40ch;font-size:15.5px}
+  .rail{margin-top:30px;padding-top:24px;border-top:1px solid var(--line);display:flex;flex-direction:column;gap:11px;font-size:14px;color:var(--text-3)}
+  .rail span{display:flex;gap:10px;align-items:center}
+  .rail i{width:4px;height:4px;border-radius:50%;background:var(--accent);flex:none}
+  .panel{display:flex;align-items:center;justify-content:center;padding:48px 32px}
+  .card{width:100%;max-width:372px}
+  .tabs{display:flex;gap:4px;padding:4px;background:var(--surface);border-radius:11px;margin:26px 0 4px}
+  .tab{flex:1;padding:9px;border-radius:8px;border:0;background:transparent;color:var(--text-2);font-family:inherit;font-size:14px;font-weight:600;cursor:pointer;transition:background-color .2s,color .2s}
+  .tab[aria-selected="true"]{background:var(--surface-2);color:var(--text)}
+  .sep{display:flex;align-items:center;gap:14px;margin:22px 0 4px;color:var(--text-3);font-size:12.5px}
+  .sep::before,.sep::after{content:"";flex:1;height:1px;background:var(--line)}
+  .fine{margin-top:22px;font-size:12.5px;color:var(--text-3);line-height:1.6}
+  @media (max-width:880px){.wrap{grid-template-columns:1fr}.aside{display:none}}
+</style>
+</head>
+<body>
+<main class="wrap">
+  <section class="aside">
+    <a class="brand" href="/">
+      <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="1.5" y="1.5" width="21" height="21" rx="6.5" stroke="#C8F24C" stroke-width="1.5"/><path d="M6.5 15.5L10 11l3 3 4.5-6" stroke="#C8F24C" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      AI Trader
+    </a>
+    <div>
+      <h2>Your agents did the research. You just decide.</h2>
+      <p>The dashboard shows the one call your agents landed on, the evidence behind it, and what happened to every call you answered before.</p>
+      <div class="rail">
+        <span><i></i>Long-only US equities</span>
+        <span><i></i>Every order budget-capped</span>
+        <span><i></i>No trade without your approval</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="card">
+      <h1 id="title" style="font-size:1.6rem">Sign in</h1>
+      <p style="margin-top:10px;color:var(--text-2);font-size:15px" id="blurb">Pick up where you left off.</p>
+
+      <div class="tabs" role="tablist">
+        <button class="tab" role="tab" id="tab-login" aria-selected="true" type="button">Sign in</button>
+        <button class="tab" role="tab" id="tab-signup" aria-selected="false" type="button">Create account</button>
+      </div>
+
+      <form id="form" novalidate>
+        <label class="field"><span>Email</span>
+          <input id="email" type="email" autocomplete="email" placeholder="you@example.com" required>
+        </label>
+        <label class="field"><span>Password</span>
+          <input id="password" type="password" autocomplete="current-password" placeholder="At least 8 characters" required>
+        </label>
+        <p class="err" id="err" role="alert"></p>
+        <button class="btn btn-primary btn-block" id="submit" type="submit">Sign in</button>
+      </form>
+
+      <p class="sep">or</p>
+      <button class="btn btn-ghost btn-block" id="skip" type="button">Skip sign-in and explore</button>
+
+      <p class="fine">Prototype software. Accounts are stored for this demo only and this is not a brokerage. Skipping sign-in gives you a demo session with the same dashboard.</p>
+    </div>
+  </section>
+</main>
+
+<script>
+(function(){
+  var mode="login", $=function(id){return document.getElementById(id)};
+  function setMode(next){
+    mode=next;
+    var login = mode==="login";
+    $("tab-login").setAttribute("aria-selected", String(login));
+    $("tab-signup").setAttribute("aria-selected", String(!login));
+    $("title").textContent = login ? "Sign in" : "Create account";
+    $("blurb").textContent = login ? "Pick up where you left off." : "One account keeps your calls and their outcomes together.";
+    $("submit").textContent = login ? "Sign in" : "Create account";
+    $("password").setAttribute("autocomplete", login ? "current-password" : "new-password");
+    $("err").textContent = "";
+  }
+  $("tab-login").onclick=function(){setMode("login")};
+  $("tab-signup").onclick=function(){setMode("signup")};
+  ["email","password"].forEach(function(id){ $(id).addEventListener("input", function(){ $("err").textContent=""; }); });
+
+  function go(){ window.location.href="/app"; }
+
+  async function post(url, body){
+    var res = await fetch(url, {method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify(body||{})});
+    var data = await res.json().catch(function(){return {}});
+    if(!res.ok) throw new Error(data.detail || "Something went wrong. Try again.");
+    return data;
+  }
+
+  $("form").addEventListener("submit", async function(e){
+    e.preventDefault();
+    var email=$("email").value.trim(), password=$("password").value;
+    if(!email){ $("err").textContent="Enter your email address."; $("email").focus(); return; }
+    if(!password){ $("err").textContent="Enter your password."; $("password").focus(); return; }
+    if(mode==="signup" && password.length<8){ $("err").textContent="Use at least 8 characters for your password."; $("password").focus(); return; }
+    $("submit").disabled=true; $("submit").textContent="Working…";
+    try{ await post(mode==="login"?"/api/auth/login":"/api/auth/signup", {email:email,password:password}); go(); }
+    catch(err){ $("err").textContent=err.message; $("submit").disabled=false; setMode(mode); }
+  });
+
+  $("skip").addEventListener("click", async function(){
+    $("skip").disabled=true; $("skip").textContent="Opening demo…";
+    try{ await post("/api/auth/demo"); go(); }
+    catch(err){ $("err").textContent=err.message; $("skip").disabled=false; $("skip").textContent="Skip sign-in and explore"; }
+  });
+})();
+</script>
+</body>
+</html>

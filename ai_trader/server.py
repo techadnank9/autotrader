@@ -4,11 +4,12 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi import Cookie, FastAPI, Header, HTTPException, Request, Response
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from ai_trader.accounts import AccountError, SessionSigner, UserStore, demo_user
 from ai_trader.config import Settings
 from ai_trader.decisions import Decision, DecisionClosed, DecisionService, DecisionStore
 from ai_trader.engine import AnalysisRequest, DEFAULT_UNIVERSE, RecommendationEngine, SourceWeights
@@ -39,6 +40,28 @@ def _execute_decision(decision: Decision) -> dict[str, Any]:
 
 
 decisions = DecisionService(decision_store, executor=_execute_decision)
+users = UserStore(settings.account_dir)
+sessions = SessionSigner(settings.session_secret)
+SESSION_COOKIE = "aitrader_session"
+
+
+def _current_user(token: str | None):
+    user_id = sessions.verify(token)
+    if not user_id:
+        return None
+    return users.get(user_id)
+
+
+def _set_session(response: Response, user_id: str) -> None:
+    response.set_cookie(
+        SESSION_COOKIE,
+        sessions.issue(user_id),
+        max_age=60 * 60 * 24 * 14,
+        httponly=True,
+        samesite="lax",
+        secure=settings.session_secure_cookie,
+        path="/",
+    )
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
@@ -71,6 +94,11 @@ class ActivateAgentPayload(BaseModel):
     version_id: str
 
 
+class AnswerPayload(BaseModel):
+    decision_id: str
+    approved: bool
+
+
 class ProposePayload(BaseModel):
     pool_size: int = Field(default=5, ge=1, le=10)
     budget: str | None = None
@@ -88,8 +116,21 @@ def landing() -> FileResponse:
     return FileResponse(STATIC_DIR / "landing.html")
 
 
+@app.get("/login")
+def login_page() -> FileResponse:
+    return FileResponse(STATIC_DIR / "auth.html")
+
+
 @app.get("/app")
-def dashboard() -> FileResponse:
+def dashboard(aitrader_session: str | None = Cookie(default=None)):
+    """The dashboard needs a session. Signing in is one click via Skip."""
+    if _current_user(aitrader_session) is None:
+        return RedirectResponse("/login", status_code=303)
+    return FileResponse(STATIC_DIR / "dashboard.html")
+
+
+@app.get("/legacy")
+def legacy_dashboard() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
 
 
@@ -230,13 +271,37 @@ def sia_run(payload: SiaRunPayload) -> dict[str, Any]:
     }
 
 
+def _require_user(token: str | None):
+    user = _current_user(token)
+    if user is None:
+        raise HTTPException(status_code=401, detail="Sign in to use this.")
+    return user
+
+
+@app.post("/api/decisions/answer")
+def answer_decision(
+    payload: AnswerPayload,
+    aitrader_session: str | None = Cookie(default=None),
+) -> dict[str, Any]:
+    """Approve or skip from the dashboard, through the same gate Telegram uses."""
+    user = _require_user(aitrader_session)
+    try:
+        decision = decisions.answer(
+            payload.decision_id, approved=payload.approved, responder=f"dashboard:{user.user_id}"
+        )
+    except DecisionClosed as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"decision": decision.to_dict()}
+
+
 @app.get("/api/telegram/status")
 def telegram_status() -> dict[str, Any]:
     return telegram.status()
 
 
 @app.get("/api/decisions")
-def list_decisions() -> dict[str, Any]:
+def list_decisions(aitrader_session: str | None = Cookie(default=None)) -> dict[str, Any]:
+    _require_user(aitrader_session)
     return {
         "open": [d.to_dict() for d in decision_store.open_decisions()],
         "recent": [d.to_dict() for d in decision_store.list(limit=20)],
@@ -244,8 +309,12 @@ def list_decisions() -> dict[str, Any]:
 
 
 @app.post("/api/decisions/propose")
-def propose_decision(payload: ProposePayload) -> dict[str, Any]:
+def propose_decision(
+    payload: ProposePayload,
+    aitrader_session: str | None = Cookie(default=None),
+) -> dict[str, Any]:
     """Run the research pass and propose at most one decision."""
+    _require_user(aitrader_session)
     try:
         budget = Decimal(payload.budget) if payload.budget else settings.default_budget_usd
     except InvalidOperation as exc:
@@ -339,3 +408,48 @@ async def telegram_webhook(
         telegram.settle_message((message.get("chat") or {}).get("id"), message.get("message_id"), decision)
 
     return {"ok": True, "decision": decision.to_dict()}
+
+
+class CredentialsPayload(BaseModel):
+    email: str
+    password: str
+
+
+@app.get("/api/auth/me")
+def auth_me(aitrader_session: str | None = Cookie(default=None)) -> dict[str, Any]:
+    user = _current_user(aitrader_session)
+    return {"authenticated": user is not None, "user": user.to_public() if user else None}
+
+
+@app.post("/api/auth/signup")
+def auth_signup(payload: CredentialsPayload, response: Response) -> dict[str, Any]:
+    try:
+        user = users.create(payload.email, payload.password)
+    except AccountError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _set_session(response, user.user_id)
+    return {"user": user.to_public()}
+
+
+@app.post("/api/auth/login")
+def auth_login(payload: CredentialsPayload, response: Response) -> dict[str, Any]:
+    try:
+        user = users.authenticate(payload.email, payload.password)
+    except AccountError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    _set_session(response, user.user_id)
+    return {"user": user.to_public()}
+
+
+@app.post("/api/auth/demo")
+def auth_demo(response: Response) -> dict[str, Any]:
+    """Skip sign-in and browse with a demo session."""
+    user = demo_user()
+    _set_session(response, user.user_id)
+    return {"user": user.to_public()}
+
+
+@app.post("/api/auth/logout")
+def auth_logout(response: Response) -> dict[str, Any]:
+    response.delete_cookie(SESSION_COOKIE, path="/")
+    return {"ok": True}

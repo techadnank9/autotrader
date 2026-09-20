@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Dashboard — AI Trader</title>
+<meta name="theme-color" content="#08090B">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/app.css">
+<link rel="stylesheet" href="/static/dashboard.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="bar">
+    <a class="brand" href="/">
+      <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="1.5" y="1.5" width="21" height="21" rx="6.5" stroke="#C8F24C" stroke-width="1.5"/><path d="M6.5 15.5L10 11l3 3 4.5-6" stroke="#C8F24C" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      AI Trader
+    </a>
+    <span class="who" id="who"></span>
+    <button class="btn btn-quiet btn-sm" id="signout" type="button">Sign out</button>
+  </div>
+</header>
+
+<main class="page">
+  <p class="demo-note" id="demo-note" hidden>You are in a demo session. Nothing here can place a real order.</p>
+
+  <section class="call" id="call-section" aria-labelledby="call-h">
+    <div class="call-head">
+      <h1 id="call-h">Today's call</h1>
+      <button class="btn btn-ghost btn-sm" id="run" type="button">Run research</button>
+    </div>
+    <div id="call-body"><p class="skel">Loading…</p></div>
+  </section>
+
+  <section class="grid">
+    <section class="panel" aria-labelledby="why-h">
+      <h2 id="why-h">Why this call</h2>
+      <p class="panel-sub">The reasoning your agents recorded, step by step.</p>
+      <div id="why"><p class="empty">No reasoning recorded yet. Run research to produce a call.</p></div>
+    </section>
+
+    <section class="panel" aria-labelledby="acct-h">
+      <h2 id="acct-h">Account</h2>
+      <p class="panel-sub">Read from your brokerage snapshot.</p>
+      <dl class="stats" id="stats"></dl>
+      <div class="holdings" id="holdings"></div>
+    </section>
+  </section>
+
+  <section class="panel" aria-labelledby="hist-h">
+    <h2 id="hist-h">Decision history</h2>
+    <p class="panel-sub">Every call, what you answered, and what happened next.</p>
+    <div id="history"><p class="empty">No decisions yet.</p></div>
+  </section>
+
+  <section class="panel" aria-labelledby="rails-h">
+    <h2 id="rails-h">Limits in force</h2>
+    <p class="panel-sub">Enforced in code on every order, not configurable from here.</p>
+    <dl class="stats" id="rails"></dl>
+    <p class="delivery" id="delivery"></p>
+  </section>
+
+  <footer class="foot">
+    <p>Prototype software, not a brokerage and not investment advice. Figures shown before a brokerage is connected are illustrative.</p>
+  </footer>
+</main>
+<script src="/static/dashboard.js"></script>
+</body>
+</html>

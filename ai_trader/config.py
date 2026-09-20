@@ -59,6 +59,9 @@ class Settings:
     telegram_webhook_secret: str | None = None
     decision_dir: str = ".ai_trader/decisions"
     decision_ttl_minutes: int = 240
+    account_dir: str = ".ai_trader/accounts"
+    session_secret: str = "dev-insecure-session-secret"
+    session_secure_cookie: bool = False
 
     @classmethod
     def load(cls, dotenv_path: str = ".env") -> "Settings":
@@ -131,6 +134,12 @@ class Settings:
             decision_dir=os.environ.get("DECISION_DIR", ".ai_trader/decisions").strip()
             or ".ai_trader/decisions",
             decision_ttl_minutes=decision_ttl_minutes,
+            account_dir=os.environ.get("ACCOUNT_DIR", ".ai_trader/accounts").strip()
+            or ".ai_trader/accounts",
+            session_secret=os.environ.get("SESSION_SECRET", "").strip()
+            or "dev-insecure-session-secret",
+            session_secure_cookie=os.environ.get("SESSION_SECURE_COOKIE", "").strip().lower()
+            in {"1", "true", "yes", "on"},
         )
 
 def _nonnegative_decimal_from_env(name: str, default: str) -> Decimal:
