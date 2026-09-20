@@ -61,7 +61,13 @@ class SiaRunPayload(BaseModel):
 
 
 @app.get("/")
-def index() -> FileResponse:
+def landing() -> FileResponse:
+    """Marketing landing page. The operating dashboard lives at /app."""
+    return FileResponse(STATIC_DIR / "landing.html")
+
+
+@app.get("/app")
+def dashboard() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
 
 

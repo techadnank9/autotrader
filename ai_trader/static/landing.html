@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AI Trader — your agents research, you decide</title>
+<meta name="description" content="Autonomous agents read the market overnight and send you one decision: a ticker, an amount, and the reasoning. Approve it with a tap, or skip it. Nothing moves without you.">
+<meta name="theme-color" content="#08090B">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/landing.css">
+</head>
+<body>
+
+<nav class="nav" id="nav">
+  <div class="shell nav-in">
+    <a class="brand" href="/">
+      <svg class="brand-mark" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <rect x="1.5" y="1.5" width="21" height="21" rx="6.5" stroke="#C8F24C" stroke-width="1.5"/>
+        <path d="M6.5 15.5L10 11l3 3 4.5-6" stroke="#C8F24C" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      AI Trader
+    </a>
+    <div class="nav-links">
+      <a href="#how">How it works</a>
+      <a href="#guardrails">Guardrails</a>
+      <a href="https://github.com/techadnank9/autotrader">Source</a>
+    </div>
+    <a class="btn btn-primary btn-sm" href="/app">Open the dashboard</a>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="shell hero-grid">
+    <div>
+      <h1>Your agents did the research.<br>You just decide.</h1>
+      <p class="hero-lede">AI Trader reads the market while you sleep — filings, news, price action, the loud parts of the internet — and brings back one call. A ticker, an amount, and why. You approve it or you don't.</p>
+      <div class="hero-cta">
+        <a class="btn btn-primary" href="/app">
+          Open the dashboard
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M7 17L17 7M17 7H9M17 7v8" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </a>
+        <a class="btn btn-ghost" href="#how">See how it works</a>
+      </div>
+      <p class="hero-facts">
+        <span><i class="dot"></i>Long-only US equities</span>
+        <span><i class="dot"></i>Every order budget-capped</span>
+        <span><i class="dot"></i>No trade without your tap</span>
+      </p>
+    </div>
+
+    <div class="stage">
+      <div class="glow" aria-hidden="true"></div>
+      <div class="phone" id="phone">
+        <div class="screen">
+          <div class="island" aria-hidden="true"></div>
+          <div class="status mono"><span>9:41</span><span>Mon</span></div>
+
+          <div class="screen-body">
+            <div class="toast">
+              <span class="toast-ic" aria-hidden="true">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M18 8A6 6 0 1 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M13.7 21a2 2 0 0 1-3.4 0" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+              </span>
+              <span class="toast-txt">
+                <span class="toast-t">One call is ready</span>
+                <span class="toast-s">6 agents finished overnight</span>
+              </span>
+            </div>
+
+            <div class="card card-reveal">
+              <p class="card-top"><span>TODAY'S CALL</span><span class="mono">09:41</span></p>
+              <p class="tick"><span class="tick-sym mono">NVDA</span><span class="tick-move mono">▲ 2.14%</span></p>
+              <p class="order">Buy <b class="mono">$25.00</b> · market open</p>
+              <p class="why">Three independent supply-chain checks moved the same direction this week, and the move has not shown up in price yet.</p>
+              <div class="meter">
+                <p class="meter-head"><span>CONFIDENCE</span><span class="mono">0.81</span></p>
+                <div class="meter-track"><i class="meter-fill"></i></div>
+              </div>
+              <div class="acts">
+                <button class="act" type="button">Skip</button>
+                <button class="act act-yes" type="button">Approve</button>
+              </div>
+              <p class="card-note">Illustrative example. Not a recommendation.</p>
+            </div>
+
+            <div class="evidence card-reveal">
+              <p class="ev-row"><span>Supply-chain checks</span><span class="mono">3 sources</span></p>
+              <p class="ev-row"><span>Wire coverage</span><span class="mono">7 sources</span></p>
+              <p class="ev-row"><span>Retail chatter</span><span class="mono">weighted down</span></p>
+            </div>
+
+            <p class="scanning"><i class="pulse"></i>Reviewed 1,412 sources since 6:00</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<section class="sec" id="how">
+  <div class="shell split">
+    <div class="split-l">
+      <h2 class="sec-h">From fourteen hundred headlines to one decision.</h2>
+      <p class="sec-sub">The agents do the part that does not scale — reading everything, every day, without getting bored or scared. The judgment that decides your money stays with you.</p>
+    </div>
+    <div class="steps">
+      <article class="step">
+        <p class="step-n">01</p>
+        <h3>They read the market</h3>
+        <p>Overnight, a pool of agents pulls filings, wire coverage, price and volume history, and retail chatter for every name in the watch universe.</p>
+        <div class="chips"><span class="chip">SEC filings</span><span class="chip">wire news</span><span class="chip">price + volume</span><span class="chip">reddit</span><span class="chip">x</span></div>
+      </article>
+      <article class="step">
+        <p class="step-n">02</p>
+        <h3>They argue it down to a ranking</h3>
+        <p>Each name gets scored on evidence strength, not volume of mentions. A story repeated by forty accounts still counts once.</p>
+        <div class="rank">
+          <div class="rank-row"><span class="rank-sym">NVDA</span><span class="rank-bar"><i style="width:81%"></i></span><span class="rank-val">0.81</span></div>
+          <div class="rank-row"><span class="rank-sym">AAPL</span><span class="rank-bar"><i style="width:57%"></i></span><span class="rank-val">0.57</span></div>
+          <div class="rank-row"><span class="rank-sym">COST</span><span class="rank-bar"><i style="width:31%"></i></span><span class="rank-val">0.31</span></div>
+        </div>
+      </article>
+      <article class="step">
+        <p class="step-n">03</p>
+        <h3>You get one call, not a feed</h3>
+        <p>One card. The ticker, the size, the reasoning, and the evidence behind it. Approve and it routes to your brokerage. Skip and nothing happens — which is the default.</p>
+      </article>
+    </div>
+  </div>
+</section>
+
+<section class="sec" id="guardrails">
+  <div class="shell">
+    <h2 class="sec-h">It cannot trade without your tap.</h2>
+    <p class="sec-sub">Most of the engineering here went into what the system refuses to do. These are enforced in code, not promised in a policy page.</p>
+    <div class="rails">
+      <div class="rail">
+        <h3><svg width="19" height="19" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 3l7.5 3v5.5c0 4.6-3.1 8.2-7.5 9.5-4.4-1.3-7.5-4.9-7.5-9.5V6L12 3z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>Explicit approval</h3>
+        <p>Every order needs your tap. The default action is always to do nothing, and a missed notification costs you nothing.</p>
+      </div>
+      <div class="rail">
+        <h3><svg width="19" height="19" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 12h16M7 8h10M7 16h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>A hard budget ceiling</h3>
+        <p>You set the maximum an order can ever be. The agents cannot size past it, and nothing in the loop can raise it on its own.</p>
+      </div>
+      <div class="rail">
+        <h3><svg width="19" height="19" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 19V9m7 10V5m7 14v-6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>Long-only equities</h3>
+        <p>No options, no crypto, no shorting, no leverage, no penny stocks. The instruments that turn a bad call into a catastrophe are simply absent.</p>
+      </div>
+      <div class="rail">
+        <h3><svg width="19" height="19" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M6 4h12v16l-6-3-6 3V4z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>A full audit trail</h3>
+        <p>Every decision is logged with the evidence that produced it, then scored against what actually happened. You can always ask why.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="sec cta">
+  <div class="shell">
+    <h2>Read less. Decide better.</h2>
+    <p>The research engine and the approval loop are running today in the dashboard. The phone app is still being built.</p>
+    <div class="cta-row">
+      <a class="btn btn-primary" href="/app">Open the dashboard</a>
+      <a class="btn btn-ghost" href="https://github.com/techadnank9/autotrader">Read the source</a>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="shell">
+    <div class="foot-in">
+      <span>AI Trader</span>
+      <a href="/app">Dashboard</a>
+      <a href="#how">How it works</a>
+      <a href="https://github.com/techadnank9/autotrader">GitHub</a>
+    </div>
+    <p class="disclaim">Prototype software, not a brokerage and not a licensed adviser. Nothing here is investment advice. Every figure shown on this page is illustrative and does not describe past or expected performance. The phone app and push delivery are not shipped yet; the working surface today is the web dashboard.</p>
+  </div>
+</footer>
+
+<script>
+(function(){
+  var nav=document.getElementById('nav'),phone=document.getElementById('phone');
+  var io=new IntersectionObserver(function(e){nav.dataset.stuck=(!e[0].isIntersecting).toString()},{rootMargin:"-1px 0px 0px 0px",threshold:1});
+  var sentinel=document.createElement('div');document.body.prepend(sentinel);io.observe(sentinel);
+  if(phone){
+    if(window.matchMedia('(prefers-reduced-motion: reduce)').matches){phone.classList.add('is-live');return}
+    new IntersectionObserver(function(entries,obs){
+      entries.forEach(function(en){if(en.isIntersecting){setTimeout(function(){phone.classList.add('is-live')},260);obs.unobserve(en.target)}})
+    },{threshold:.3}).observe(phone);
+  }
+})();
+</script>
+</body>
+</html>
