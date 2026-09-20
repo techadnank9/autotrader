@@ -6,6 +6,7 @@ from decimal import Decimal, InvalidOperation
 
 from ai_trader.agent_runtime import PortfolioAgentRegistry
 from ai_trader.config import Settings
+from ai_trader.telegram import TelegramClient
 from ai_trader.market_research import MarketResearchService
 from ai_trader.replay import ReplayStore, YahooEODPriceProvider
 from ai_trader.robinhood import RobinhoodTrader, print_query_result
@@ -85,6 +86,12 @@ def parse_args() -> argparse.Namespace:
 
     subparsers.add_parser("agents-rollback", help="Rollback to the previously active portfolio-manager version.")
 
+    subparsers.add_parser("telegram-status", help="Check the Telegram bot and webhook registration.")
+
+    hook_parser = subparsers.add_parser("telegram-webhook", help="Register the Telegram callback webhook.")
+    hook_parser.add_argument("base_url", help="Public HTTPS base URL, e.g. https://pilottrader.vercel.app")
+    hook_parser.add_argument("--delete", action="store_true", help="Remove the webhook instead of setting it.")
+
     register_parser = subparsers.add_parser(
         "agents-register",
         help="Register a SIA-generated portfolio-manager artifact so it becomes selectable in the app.",
@@ -142,6 +149,21 @@ def main() -> int:
             replay = ReplayStore(settings.replay_log_dir)
             market = MarketResearchService(settings, replay)
             print(json.dumps(market.collect_daily_snapshot(force=args.force), indent=2))
+            return 0
+
+        if args.command == "telegram-status":
+            print(json.dumps(TelegramClient(settings).status(), indent=2))
+            return 0
+
+        if args.command == "telegram-webhook":
+            client = TelegramClient(settings)
+            if args.delete:
+                print(json.dumps(client.delete_webhook(), indent=2))
+                return 0
+            if not settings.telegram_webhook_secret:
+                raise ValueError("Set TELEGRAM_WEBHOOK_SECRET before registering the webhook.")
+            url = args.base_url.rstrip("/") + "/api/telegram/webhook"
+            print(json.dumps(client.set_webhook(url), indent=2))
             return 0
 
         if args.command == "agents-list":

@@ -193,6 +193,43 @@ Every Codex subprocess call is guarded. With no `codex` on `PATH` the app still 
 `doctor` reports `codex_found: false`, analysis returns the fallback ranking, portfolio
 management returns `no_trade` against an empty account, and no order is ever attempted.
 
+## Telegram approval loop
+
+The approval gate is a decision record, and the Telegram card is one delivery
+channel for it. Execution is reachable only through a record whose status is
+`approved`, so a lost message or an unanswered card places nothing.
+
+1. Create a bot with @BotFather and copy the token.
+2. Message the bot once, then read your numeric id from
+   `https://api.telegram.org/bot<TOKEN>/getUpdates`.
+3. Set the environment:
+
+```bash
+TELEGRAM_BOT_TOKEN=123456:ABC...
+TELEGRAM_CHAT_ID=555111
+TELEGRAM_WEBHOOK_SECRET=<a long random string you choose>
+DECISION_TTL_MINUTES=240
+```
+
+4. Register the webhook against your public URL:
+
+```bash
+PYTHONPATH=. venv/bin/python -m ai_trader telegram-webhook https://your-app.example.com
+PYTHONPATH=. venv/bin/python -m ai_trader telegram-status
+```
+
+5. Propose a decision. It runs the research pass and sends at most one card:
+
+```bash
+curl -X POST https://your-app.example.com/api/decisions/propose \
+  -H 'content-type: application/json' -d '{"pool_size":5}'
+```
+
+Two independent checks guard the callback: the shared secret proves the request
+came from Telegram, and the responder id must match `TELEGRAM_CHAT_ID`, so
+another Telegram user who finds the bot cannot approve your orders. A decision
+can be answered once; replays, expired cards, and skips never reach the executor.
+
 ## Guardrails
 
 - Budget is hard-capped by `MAX_BUDGET_USD`.

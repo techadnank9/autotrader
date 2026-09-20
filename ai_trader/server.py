@@ -4,16 +4,18 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from ai_trader.config import Settings
+from ai_trader.decisions import Decision, DecisionClosed, DecisionService, DecisionStore
 from ai_trader.engine import AnalysisRequest, DEFAULT_UNIVERSE, RecommendationEngine, SourceWeights
 from ai_trader.portfolio_engine import ManagePortfolioRequest, PortfolioManagementEngine
 from ai_trader.robinhood import RobinhoodTrader
 from ai_trader.sia import SIAService
+from ai_trader.telegram import TelegramClient, parse_callback
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
@@ -23,6 +25,20 @@ engine = RecommendationEngine(settings)
 trader = RobinhoodTrader(settings)
 portfolio_engine = PortfolioManagementEngine(settings, trader=trader)
 sia_service = SIAService(settings)
+telegram = TelegramClient(settings)
+decision_store = DecisionStore(settings.decision_dir)
+
+
+def _execute_decision(decision: Decision) -> dict[str, Any]:
+    """The only path from an approved decision to a real order."""
+    return engine.trade(
+        {"symbol": decision.symbol, "dollar_amount": decision.amount_usd},
+        execute=True,
+        confirm_phrase="CONFIRM",
+    )
+
+
+decisions = DecisionService(decision_store, executor=_execute_decision)
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
@@ -53,6 +69,12 @@ class ManagePortfolioPayload(BaseModel):
 
 class ActivateAgentPayload(BaseModel):
     version_id: str
+
+
+class ProposePayload(BaseModel):
+    pool_size: int = Field(default=5, ge=1, le=10)
+    budget: str | None = None
+    notify: bool = True
 
 
 class SiaRunPayload(BaseModel):
@@ -206,3 +228,114 @@ def sia_run(payload: SiaRunPayload) -> dict[str, Any]:
         **result,
         "reasoning_trace": sia_service.reasoning_trace("run", result),
     }
+
+
+@app.get("/api/telegram/status")
+def telegram_status() -> dict[str, Any]:
+    return telegram.status()
+
+
+@app.get("/api/decisions")
+def list_decisions() -> dict[str, Any]:
+    return {
+        "open": [d.to_dict() for d in decision_store.open_decisions()],
+        "recent": [d.to_dict() for d in decision_store.list(limit=20)],
+    }
+
+
+@app.post("/api/decisions/propose")
+def propose_decision(payload: ProposePayload) -> dict[str, Any]:
+    """Run the research pass and propose at most one decision."""
+    try:
+        budget = Decimal(payload.budget) if payload.budget else settings.default_budget_usd
+    except InvalidOperation as exc:
+        raise HTTPException(status_code=400, detail="budget must be a decimal value") from exc
+    if budget <= 0 or budget > settings.max_budget_usd:
+        raise HTTPException(status_code=400, detail=f"budget must be > 0 and <= {settings.max_budget_usd}")
+
+    analysis = engine.analyze(
+        AnalysisRequest(budget=budget, pool_size=payload.pool_size, weights=SourceWeights(0.35, 0.25, 0.40))
+    )
+    recommendation = analysis.get("recommendation") or {}
+    if recommendation.get("decision") != "buy" or not recommendation.get("symbol"):
+        return {"status": "no_trade", "reason": recommendation.get("rationale", "No candidate cleared the bar."), "analysis": analysis}
+
+    amount = Decimal(str(recommendation.get("dollar_amount") or budget))
+    amount = min(amount, settings.max_budget_usd)
+
+    try:
+        decision = decisions.propose(
+            symbol=str(recommendation["symbol"]),
+            side="buy",
+            amount_usd=amount,
+            confidence=float(recommendation.get("confidence") or 0),
+            reason=str(recommendation.get("rationale") or "No rationale supplied."),
+            ttl_minutes=settings.decision_ttl_minutes,
+            policy={"max_budget_usd": str(settings.max_budget_usd), "long_only": True},
+        )
+    except DecisionClosed as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    delivery: dict[str, Any] = {"sent": False}
+    if payload.notify and telegram.configured:
+        result = telegram.send_decision(decision)
+        delivery = {"sent": bool(result.get("ok")), "detail": result.get("description")}
+        if result.get("ok"):
+            message = result.get("result") or {}
+            decision.delivery = {
+                "channel": "telegram",
+                "chat_id": (message.get("chat") or {}).get("id"),
+                "message_id": message.get("message_id"),
+            }
+            decision_store.save(decision)
+    elif payload.notify:
+        delivery = {"sent": False, "detail": "Telegram is not configured."}
+
+    return {"status": "proposed", "decision": decision.to_dict(), "delivery": delivery}
+
+
+@app.post("/api/telegram/webhook")
+async def telegram_webhook(
+    request: Request,
+    x_telegram_bot_api_secret_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Telegram callback handler.
+
+    Two independent checks guard this: the shared secret proves the request came
+    from Telegram, and the responder id proves it came from the account that owns
+    the account being traded.
+    """
+    secret = settings.telegram_webhook_secret
+    if not secret or x_telegram_bot_api_secret_token != secret:
+        raise HTTPException(status_code=401, detail="Bad webhook secret.")
+
+    update = await request.json()
+    callback = (update or {}).get("callback_query")
+    if not isinstance(callback, dict):
+        return {"ok": True, "ignored": "not a callback_query"}
+
+    responder = str(((callback.get("from") or {}).get("id")) or "")
+    if not settings.telegram_chat_id or responder != str(settings.telegram_chat_id):
+        telegram.answer_callback(str(callback.get("id")), "This account cannot answer.", alert=True)
+        return {"ok": True, "rejected": "unauthorized responder"}
+
+    parsed = parse_callback(callback.get("data") or "")
+    if parsed is None:
+        return {"ok": True, "ignored": "unrecognized callback data"}
+    decision_id, approved = parsed
+
+    try:
+        decision = decisions.answer(decision_id, approved=approved, responder=responder)
+    except DecisionClosed as exc:
+        telegram.answer_callback(str(callback.get("id")), str(exc), alert=True)
+        return {"ok": True, "closed": str(exc)}
+
+    telegram.answer_callback(
+        str(callback.get("id")),
+        "Approved. Placing the order." if approved else "Skipped. Nothing was placed.",
+    )
+    message = callback.get("message") or {}
+    if message.get("message_id"):
+        telegram.settle_message((message.get("chat") or {}).get("id"), message.get("message_id"), decision)
+
+    return {"ok": True, "decision": decision.to_dict()}

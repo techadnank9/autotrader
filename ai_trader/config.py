@@ -54,6 +54,11 @@ class Settings:
     sia_meta_profile: str = "sia_profiles/ai-trader-meta.json"
     sia_target_profile: str = "sia_profiles/ai-trader-portfolio.json"
     sia_web_port: int = 8010
+    telegram_bot_token: str | None = None
+    telegram_chat_id: str | None = None
+    telegram_webhook_secret: str | None = None
+    decision_dir: str = ".ai_trader/decisions"
+    decision_ttl_minutes: int = 240
 
     @classmethod
     def load(cls, dotenv_path: str = ".env") -> "Settings":
@@ -71,6 +76,7 @@ class Settings:
         market_evidence_symbol_limit = _int_from_env("MARKET_EVIDENCE_SYMBOL_LIMIT", "50")
         market_label_horizons = _int_tuple_from_env("MARKET_LABEL_HORIZONS", "1,5")
         sia_web_port = _int_from_env("SIA_WEB_PORT", "8010")
+        decision_ttl_minutes = _int_from_env("DECISION_TTL_MINUTES", "240")
         if default_budget > max_budget:
             raise ValueError("DEFAULT_BUDGET_USD cannot exceed MAX_BUDGET_USD.")
 
@@ -119,6 +125,12 @@ class Settings:
             sia_target_profile=os.environ.get("SIA_TARGET_PROFILE", "sia_profiles/ai-trader-portfolio.json").strip()
             or "sia_profiles/ai-trader-portfolio.json",
             sia_web_port=sia_web_port,
+            telegram_bot_token=os.environ.get("TELEGRAM_BOT_TOKEN", "").strip() or None,
+            telegram_chat_id=os.environ.get("TELEGRAM_CHAT_ID", "").strip() or None,
+            telegram_webhook_secret=os.environ.get("TELEGRAM_WEBHOOK_SECRET", "").strip() or None,
+            decision_dir=os.environ.get("DECISION_DIR", ".ai_trader/decisions").strip()
+            or ".ai_trader/decisions",
+            decision_ttl_minutes=decision_ttl_minutes,
         )
 
 def _nonnegative_decimal_from_env(name: str, default: str) -> Decimal:
