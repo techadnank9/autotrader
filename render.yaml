@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: autotrader
+    name: aitrader
     runtime: python
     plan: free
     region: oregon
