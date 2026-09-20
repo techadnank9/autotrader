@@ -27,7 +27,6 @@ trader = RobinhoodTrader(settings)
 portfolio_engine = PortfolioManagementEngine(settings, trader=trader)
 sia_service = SIAService(settings)
 telegram = TelegramClient(settings)
-decision_store = DecisionStore(settings.decision_dir)
 
 
 def _execute_decision(decision: Decision) -> dict[str, Any]:
@@ -39,8 +38,21 @@ def _execute_decision(decision: Decision) -> dict[str, Any]:
     )
 
 
+def _build_stores():
+    """Postgres when DATABASE_URL is set, JSON files otherwise."""
+    if settings.database_url:
+        try:
+            from ai_trader.db import Database, PostgresDecisionStore, PostgresUserStore
+
+            database = Database(settings.database_url)
+            return PostgresUserStore(database), PostgresDecisionStore(database), "postgres"
+        except Exception as exc:  # a broken DSN must not take the whole app down
+            print(f"Postgres unavailable, falling back to file stores: {exc}")
+    return UserStore(settings.account_dir), DecisionStore(settings.decision_dir), "files"
+
+
+users, decision_store, STORAGE_BACKEND = _build_stores()
 decisions = DecisionService(decision_store, executor=_execute_decision)
-users = UserStore(settings.account_dir)
 sessions = SessionSigner(settings.session_secret)
 SESSION_COOKIE = "aitrader_session"
 
@@ -154,6 +166,7 @@ def config() -> dict[str, Any]:
         },
         "portfolio_candidate_pool_size": settings.portfolio_candidate_pool_size,
         "active_portfolio_agent": portfolio_engine.registry.list_agents()["current"],
+        "storage_backend": STORAGE_BACKEND,
         "sia": sia_service.status(),
     }
 

@@ -12,3 +12,5 @@ ai_trader/stock_evidence.json
 .claude/
 .vercel
 .env*
+.agents/
+skills-lock.json

@@ -62,6 +62,7 @@ class Settings:
     account_dir: str = ".ai_trader/accounts"
     session_secret: str = "dev-insecure-session-secret"
     session_secure_cookie: bool = False
+    database_url: str | None = None
 
     @classmethod
     def load(cls, dotenv_path: str = ".env") -> "Settings":
@@ -140,6 +141,9 @@ class Settings:
             or "dev-insecure-session-secret",
             session_secure_cookie=os.environ.get("SESSION_SECURE_COOKIE", "").strip().lower()
             in {"1", "true", "yes", "on"},
+            database_url=os.environ.get("DATABASE_URL", "").strip()
+            or os.environ.get("POSTGRES_URL", "").strip()
+            or None,
         )
 
 def _nonnegative_decimal_from_env(name: str, default: str) -> Decimal:
