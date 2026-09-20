@@ -1,0 +1,6 @@
+venv/
+.venv/
+.ai_trader/
+sia_tasks/
+__pycache__/
+*.pyc

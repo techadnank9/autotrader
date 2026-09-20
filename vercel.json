@@ -1,0 +1,15 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "services": {
+    "aitrader": {
+      "root": ".",
+      "framework": "fastapi",
+      "runtime": "python",
+      "entrypoint": "main:app",
+      "functions": { "main.py": { "maxDuration": 60 } }
+    }
+  },
+  "rewrites": [
+    { "source": "/(.*)", "destination": { "service": "aitrader" } }
+  ]
+}

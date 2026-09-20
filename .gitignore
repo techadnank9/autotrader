@@ -10,3 +10,5 @@ __pycache__/
 runs/sia_tasks/*/data/
 ai_trader/stock_evidence.json
 .claude/
+.vercel
+.env*
