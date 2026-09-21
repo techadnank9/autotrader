@@ -21,6 +21,7 @@ from ai_trader.robinhood import RobinhoodTrader
 from ai_trader.sia import SIAService
 from ai_trader.telegram import TelegramClient, parse_callback
 from ai_trader import google_oauth
+from ai_trader import robinhood_mcp as rh
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
@@ -44,7 +45,10 @@ def _execute_decision(decision: Decision) -> dict[str, Any]:
         return {"status": "blocked", "message": "Decision has no owner, so no account to trade in."}
     user_broker = _broker_for_user(decision.user_id)
     if not user_broker.configured:
-        return {"status": "blocked", "message": "No broker connected. Connect Alpaca in Profile to trade."}
+        return {"status": "blocked", "message": "No broker connected. Connect a broker in Profile to trade."}
+    if getattr(user_broker, "live", False) and not settings.allow_live_trading:
+        return {"status": "blocked",
+                "message": "This account trades real money, and live trading is not enabled on this platform yet."}
     return user_broker.place_notional_buy(
         decision.symbol, Decimal(decision.amount_usd), client_order_id=decision.decision_id
     )
@@ -71,10 +75,21 @@ decisions = DecisionService(decision_store, executor=_execute_decision)
 sessions = SessionSigner(settings.session_secret)
 
 
+def _save_robinhood(user_id: str, client_id: str, refresh_token: str | None, extra: dict[str, Any]) -> None:
+    credential_store.save(user_id, BrokerCredentials("robinhood", client_id, refresh_token or "", True, extra))
+
+
 def _broker_for_user(user_id: str):
+    """A user has at most one active broker; connecting one removes the other."""
     if user_id == "demo":
         return NullBroker()
     try:
+        rc = credential_store.get(user_id, "robinhood")
+        if rc is not None:
+            return rh.RobinhoodBroker(
+                rc, max_order_usd=settings.max_budget_usd,
+                persist=lambda upd: _save_robinhood(user_id, rc.key_id, upd["refresh_token"], upd["extra"]),
+            )
         return broker_for(credential_store.get(user_id, "alpaca"), settings)
     except CredentialError:
         return NullBroker()
@@ -522,13 +537,19 @@ class AlpacaConnectPayload(BaseModel):
 def broker_status(aitrader_session: str | None = Cookie(default=None)) -> dict[str, Any]:
     user = _require_user(aitrader_session)
     summary = None
+    provider = None
     try:
-        summary = credential_store.summary(user.user_id, "alpaca")
+        for prov in ("robinhood", "alpaca"):
+            summary = credential_store.summary(user.user_id, prov)
+            if summary:
+                provider = prov
+                break
     except CredentialError:
         pass
     status = _broker_for_user(user.user_id).status()
     return {
         **status,
+        "provider": provider,
         "saved": summary,
         "demo": user.is_demo,
         "can_connect": (not user.is_demo) and Cipher(settings.credentials_encryption_key).ready,
@@ -560,6 +581,7 @@ def connect_alpaca(payload: AlpacaConnectPayload, aitrader_session: str | None =
 
     try:
         credential_store.save(user.user_id, BrokerCredentials("alpaca", key_id, secret, payload.live))
+        credential_store.delete(user.user_id, "robinhood")  # one active broker
     except CredentialError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return {"connected": True, "mode": "live" if payload.live else "paper", "account": account,
@@ -657,3 +679,91 @@ def google_callback(
     _set_session(response, user.user_id)
     response.delete_cookie(OAUTH_COOKIE, path="/auth")
     return response
+
+
+RH_COOKIE = "aitrader_rh"
+
+
+def _robinhood_redirect_uri(request: Request) -> str:
+    base = settings.public_base_url or str(request.base_url).rstrip("/")
+    return f"{base}/auth/robinhood/callback"
+
+
+def _profile_notice(message: str, ok: bool = False) -> RedirectResponse:
+    from urllib.parse import quote
+
+    return RedirectResponse(f"/profile?{'ok' if ok else 'error'}={quote(message)}", status_code=303)
+
+
+@app.get("/auth/robinhood")
+def robinhood_start(request: Request, aitrader_session: str | None = Cookie(default=None)):
+    """Send the signed-in user to Robinhood to authorize their own Agentic account."""
+    user = _current_user(aitrader_session)
+    if user is None:
+        return RedirectResponse("/login", status_code=303)
+    if user.is_demo:
+        return _profile_notice("Demo sessions are shared, so they cannot connect a broker. Create an account first.")
+    if not Cipher(settings.credentials_encryption_key).ready:
+        return _profile_notice("Broker connections are not enabled on this server yet.")
+    redirect_uri = _robinhood_redirect_uri(request)
+    try:
+        meta = rh.discover()
+        client_id = rh.register_client(meta, redirect_uri)
+    except rh.RobinhoodError as exc:
+        return _profile_notice(str(exc))
+    state, verifier, challenge = google_oauth.new_flow()
+    response = RedirectResponse(rh.authorize_url(meta, client_id, redirect_uri, state, challenge), status_code=303)
+    response.set_cookie(
+        RH_COOKIE, sessions.issue(f"{user.user_id}|{state}|{verifier}|{client_id}", ttl=900),
+        max_age=900, httponly=True, samesite="lax", secure=settings.session_secure_cookie, path="/auth",
+    )
+    return response
+
+
+@app.get("/auth/robinhood/callback")
+def robinhood_callback(
+    request: Request,
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+    aitrader_session: str | None = Cookie(default=None),
+    aitrader_rh: str | None = Cookie(default=None),
+):
+    user = _current_user(aitrader_session)
+    if user is None:
+        return RedirectResponse("/login", status_code=303)
+    if error:
+        return _profile_notice("Robinhood connection was cancelled.")
+    held = sessions.verify(aitrader_rh)
+    parts = held.split("|") if held else []
+    if len(parts) != 4 or not code or not state:
+        return _profile_notice("Robinhood connection expired. Please try again.")
+    owner, expected_state, verifier, client_id = parts
+    # The flow must finish in the same account that started it.
+    if owner != user.user_id or not secrets.compare_digest(expected_state, state):
+        return _profile_notice("Robinhood connection could not be verified. Please try again.")
+    try:
+        tokens = rh.exchange_code(rh.discover(), client_id, _robinhood_redirect_uri(request), code, verifier)
+    except rh.RobinhoodError as exc:
+        return _profile_notice(str(exc))
+
+    extra = {"access_token": tokens["access_token"], "expires_at": tokens["expires_at"]}
+    try:
+        _save_robinhood(user.user_id, client_id, tokens.get("refresh_token"), extra)
+        credential_store.delete(user.user_id, "alpaca")  # one active broker
+    except CredentialError as exc:
+        return _profile_notice(str(exc))
+
+    response = _profile_notice("Robinhood connected.", ok=True)
+    response.delete_cookie(RH_COOKIE, path="/auth")
+    return response
+
+
+@app.delete("/api/broker/robinhood")
+def disconnect_robinhood(aitrader_session: str | None = Cookie(default=None)) -> dict[str, Any]:
+    user = _require_user(aitrader_session)
+    try:
+        removed = credential_store.delete(user.user_id, "robinhood")
+    except CredentialError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"disconnected": removed}

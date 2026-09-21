@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -24,13 +24,21 @@ class CredentialError(Exception):
 
 @dataclass(frozen=True)
 class BrokerCredentials:
+    """For Alpaca: key id + secret. For Robinhood: OAuth client id + refresh token,
+    with the access token, expiry, and discovered tool schemas in `extra`. Every
+    field, `extra` included, is encrypted at rest."""
+
     provider: str
     key_id: str
     secret_key: str
     live: bool
+    extra: dict[str, Any] = field(default_factory=dict)
 
     @property
     def masked_key_id(self) -> str:
+        if self.provider == "robinhood":
+            acct = str(self.extra.get("account_number") or "")
+            return f"Agentic ••••{acct[-4:]}" if len(acct) >= 4 else "Agentic account"
         return f"{self.key_id[:4]}••••{self.key_id[-4:]}" if len(self.key_id) > 8 else "••••"
 
 
@@ -68,7 +76,8 @@ def _record(creds: BrokerCredentials, cipher: Cipher) -> dict[str, Any]:
         "live": creds.live,
         "connected_at": time.time(),
         "ciphertext": cipher.encrypt(
-            {"key_id": creds.key_id, "secret_key": creds.secret_key, "live": creds.live}
+            {"key_id": creds.key_id, "secret_key": creds.secret_key, "live": creds.live,
+             "extra": creds.extra}
         ),
     }
 
@@ -78,6 +87,7 @@ def _decode(provider: str, row: dict[str, Any], cipher: Cipher) -> BrokerCredent
     return BrokerCredentials(
         provider=provider, key_id=str(data["key_id"]),
         secret_key=str(data["secret_key"]), live=bool(data.get("live")),
+        extra=data.get("extra") or {},
     )
 
 

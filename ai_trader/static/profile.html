@@ -32,6 +32,15 @@
   .help{margin-top:12px;font-size:13px;color:var(--text-3);line-height:1.6}
   .help a{color:var(--text-2)}
   .bk-live{display:flex;flex-wrap:wrap;gap:12px 28px;margin-top:16px;align-items:center}
+  .choices{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:18px}
+  .choice{padding:20px;border-radius:12px;background:var(--ink);border:1px solid var(--line)}
+  .choice h3{font-size:18px;font-weight:600;letter-spacing:-.02em}
+  .choice .bk-form{margin-top:4px}
+  .note{margin-top:14px;padding:11px 14px;border-radius:10px;font-size:13.5px}
+  .note.ok{background:#1d2a12;color:#cdeb7e}
+  .note.bad{background:#2b1a18;color:#ffb3aa}
+  .note.warn{background:#2b2312;color:#f2cf86}
+  @media (max-width:880px){.choices{grid-template-columns:1fr}}
   @media (max-width:880px){.conn-row{grid-template-columns:1fr auto}.conn-detail{grid-column:1 / -1;order:3}}
 </style>
 </head>
@@ -53,13 +62,14 @@
 
 <main class="page">
   <section class="call">
-    <h1 style="font-size:20px">Profile</h1>
+    <h1 style="font-size:24px">Profile</h1>
     <dl class="stats" id="me"></dl>
   </section>
 
   <section class="panel" aria-labelledby="bk-h">
     <h2 id="bk-h">Brokerage</h2>
-    <p class="panel-sub">Connect your own Alpaca account. Approved calls are placed there, and only there.</p>
+    <p class="panel-sub">Connect your own brokerage account. Approved calls are placed there, and only there.</p>
+    <p class="note" id="bk-note" hidden></p>
     <div id="bk"><p class="empty">Checking…</p></div>
   </section>
 
@@ -93,6 +103,12 @@
 
 
   var mode = "paper";
+  (function(){
+    var q = new URLSearchParams(location.search), n = $("bk-note");
+    if (q.get("ok")) { n.textContent = q.get("ok"); n.className = "note ok"; n.hidden = false; }
+    else if (q.get("error")) { n.textContent = q.get("error"); n.className = "note bad"; n.hidden = false; }
+    if (q.get("ok") || q.get("error")) history.replaceState(null, "", "/profile");
+  })();
   async function renderBroker(){
     var b;
     try { b = await api("/api/broker/status"); } catch(e){ $("bk").innerHTML='<p class="empty">Could not check your brokerage.</p>'; return; }
@@ -102,19 +118,21 @@
       return;
     }
     if (b.saved) {
-      var s = b.saved;
+      var sv = b.saved, isRh = b.provider === "robinhood";
+      var label = isRh ? "Robinhood · " + esc(sv.masked_key_id) + " · real money"
+                       : "Alpaca " + esc(sv.live ? "live" : "paper") + ' · key <span class="mono">' + esc(sv.masked_key_id) + '</span>';
       $("bk").innerHTML =
         '<div class="bk-live">' +
           '<span class="pill ' + (b.connected ? "on" : "warn") + '"><i></i>' + (b.connected ? "Connected" : "Needs attention") + '</span>' +
-          '<span class="conn-detail">Alpaca ' + esc(s.live ? "live" : "paper") + ' · key <span class="mono">' + esc(s.masked_key_id) + '</span>' +
-          (b.connected && b.buying_power ? ' · buying power ' + money(b.buying_power) : '') + '</span>' +
+          '<span class="conn-detail">' + label + (b.connected && b.buying_power ? ' · buying power ' + money(b.buying_power) : '') + '</span>' +
           '<button class="btn btn-ghost btn-sm" id="bk-off" type="button">Disconnect</button>' +
         '</div>' +
-        (b.connected ? '' : '<p class="err">' + esc(b.message || "") + '</p>');
+        (b.connected ? '' : '<p class="err">' + esc(b.message || "") + '</p>') +
+        (isRh && !b.live_trading_allowed ? '<p class="note warn">Robinhood always trades real money, and live trading is not enabled on this platform yet, so approved calls will not place orders. You can still view your account.</p>' : '');
       $("bk-off").onclick = async function(){
-        if (!confirm("Disconnect Alpaca? Approved calls will stop placing orders until you reconnect.")) return;
+        if (!confirm("Disconnect " + (isRh ? "Robinhood" : "Alpaca") + "? Approved calls will stop placing orders until you reconnect.")) return;
         this.disabled = true;
-        try { await api("/api/broker/alpaca", {method:"DELETE"}); } catch(e){}
+        try { await api("/api/broker/" + (isRh ? "robinhood" : "alpaca"), {method:"DELETE"}); } catch(e){}
         renderBroker(); renderConnections();
       };
       return;
@@ -125,6 +143,14 @@
     }
 
     $("bk").innerHTML =
+      '<div class="choices">' +
+      '<div class="choice"><h3>Robinhood</h3>' +
+        '<p class="help" style="margin-top:8px">Sign in on Robinhood\'s own page. We never see your password. ' +
+        'Orders go to your <b>Agentic account</b>, which you open and fund on robinhood.com from a computer. ' +
+        'Robinhood has no paper trading: every order is real money.</p>' +
+        '<a class="btn btn-primary" href="/auth/robinhood" style="margin-top:16px">Connect Robinhood</a>' +
+      '</div>' +
+      '<div class="choice"><h3>Alpaca</h3>' +
       '<form class="bk-form" id="bk-form" novalidate>' +
         '<div class="mode" role="group" aria-label="Account type">' +
           '<button type="button" data-m="paper" aria-pressed="true">Paper</button>' +
@@ -138,7 +164,8 @@
         '<p class="help">Find these at <a href="https://app.alpaca.markets" target="_blank" rel="noopener">app.alpaca.markets</a> → Paper account → API Keys. ' +
         'We check the keys with Alpaca before saving. Your secret is encrypted and never shown again.' +
         (b.live_trading_allowed ? '' : ' Live accounts are not enabled on this platform yet.') + '</p>' +
-      '</form>';
+      '</form></div></div>' +
+      '<p class="help">Connecting one broker disconnects the other, so there is never doubt about which account an approval spends from.</p>';
 
     Array.prototype.forEach.call(document.querySelectorAll(".mode button"), function(btn){
       btn.onclick = function(){
