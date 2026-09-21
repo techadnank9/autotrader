@@ -66,10 +66,12 @@ class Settings:
     tavily_api_key: str | None = None
     parallel_api_key: str | None = None
     anthropic_api_key: str | None = None
-    alpaca_key_id: str | None = None
-    alpaca_secret_key: str | None = None
-    alpaca_live: bool = False
     research_time_range: str = "day"
+    credentials_encryption_key: str | None = None
+    allow_live_trading: bool = False
+    google_client_id: str | None = None
+    google_client_secret: str | None = None
+    public_base_url: str | None = None
 
     @classmethod
     def load(cls, dotenv_path: str = ".env") -> "Settings":
@@ -154,11 +156,14 @@ class Settings:
             tavily_api_key=os.environ.get("TAVILY_API_KEY", "").strip() or None,
             parallel_api_key=os.environ.get("PARALLEL_API_KEY", "").strip() or None,
             anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY", "").strip() or None,
-            alpaca_key_id=(os.environ.get("ALPACA_KEY_ID", "") or os.environ.get("APCA_API_KEY_ID", "")).strip() or None,
-            alpaca_secret_key=(os.environ.get("ALPACA_SECRET_KEY", "") or os.environ.get("APCA_API_SECRET_KEY", "")).strip() or None,
-            # Live trading must be switched on deliberately; anything else stays paper.
-            alpaca_live=os.environ.get("ALPACA_LIVE", "").strip().lower() == "true",
             research_time_range=os.environ.get("RESEARCH_TIME_RANGE", "day").strip() or "day",
+            credentials_encryption_key=os.environ.get("CREDENTIALS_ENCRYPTION_KEY", "").strip() or None,
+            # Platform kill switch: users can connect paper accounts only, until the
+            # operator deliberately allows live trading for everyone.
+            allow_live_trading=os.environ.get("ALLOW_LIVE_TRADING", "").strip().lower() == "true",
+            google_client_id=os.environ.get("GOOGLE_CLIENT_ID", "").strip() or None,
+            google_client_secret=os.environ.get("GOOGLE_CLIENT_SECRET", "").strip() or None,
+            public_base_url=(os.environ.get("APP_BASE_URL", "") or os.environ.get("PUBLIC_BASE_URL", "")).strip().rstrip("/") or None,
         )
 
 def _nonnegative_decimal_from_env(name: str, default: str) -> Decimal:

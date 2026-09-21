@@ -1,12 +1,12 @@
 """Brokers behind one interface.
 
-The decision service calls `place_notional_buy` and nothing else to trade, so the
-approval gate does not care which broker is on the other side.
+Every user connects their own brokerage, so a broker is built per request from
+that user's decrypted credentials and never shared between users.
 
-Alpaca is paper by default. Live trading needs ALPACA_LIVE=true set explicitly;
-nothing in the app can flip it. Each order also re-checks the budget ceiling and
-long-only rule here, independently of the decision service, and uses the decision
-id as `client_order_id` so a duplicated call cannot create a second order.
+The decision service calls `place_notional_buy` and nothing else to trade, so the
+approval gate does not care which broker is on the other side. Each order also
+re-checks the ceiling and long-only rule here, independently, and uses the
+decision id as `client_order_id` so a duplicated call cannot place a second order.
 """
 
 from __future__ import annotations
@@ -47,8 +47,8 @@ class NullBroker:
         return False
 
     def status(self) -> dict[str, Any]:
-        return {"broker": self.name, "configured": False,
-                "message": "No broker connected. Add Alpaca paper keys to trade."}
+        return {"broker": self.name, "configured": False, "connected": False,
+                "message": "No broker connected. Connect your Alpaca account in Profile."}
 
     def account(self) -> dict[str, Any]:
         return {}
@@ -69,20 +69,27 @@ class NullBroker:
 class AlpacaBroker:
     name = "alpaca"
 
-    def __init__(self, settings: Settings) -> None:
-        self.settings = settings
-        self.live = settings.alpaca_live
-        self.base = ALPACA_LIVE if self.live else ALPACA_PAPER
+    def __init__(self, key_id: str, secret_key: str, *, live: bool, max_order_usd: Decimal) -> None:
+        self._key_id = key_id
+        self._secret_key = secret_key
+        self.live = live
+        self.max_order_usd = max_order_usd
+        self.base = ALPACA_LIVE if live else ALPACA_PAPER
 
     @property
     def configured(self) -> bool:
-        return bool(self.settings.alpaca_key_id and self.settings.alpaca_secret_key)
+        return bool(self._key_id and self._secret_key)
 
     def _headers(self) -> dict[str, str]:
-        return {
-            "APCA-API-KEY-ID": str(self.settings.alpaca_key_id),
-            "APCA-API-SECRET-KEY": str(self.settings.alpaca_secret_key),
-        }
+        return {"APCA-API-KEY-ID": self._key_id, "APCA-API-SECRET-KEY": self._secret_key}
+
+    def verify(self) -> dict[str, Any]:
+        """Prove the keys work before they are saved. Raises BrokerError if not."""
+        acct = self._get("/v2/account")
+        if acct.get("trading_blocked") or acct.get("account_blocked"):
+            raise BrokerError("Alpaca reports this account is blocked from trading.")
+        return {"status": acct.get("status"), "buying_power": acct.get("buying_power"),
+                "currency": acct.get("currency")}
 
     def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
         try:
@@ -170,7 +177,7 @@ class AlpacaBroker:
 
     def place_notional_buy(self, symbol: str, notional: Decimal, client_order_id: str) -> dict[str, Any]:
         symbol = symbol.upper().strip()
-        ceiling = self.settings.max_budget_usd
+        ceiling = self.max_order_usd
         if notional <= 0 or notional > ceiling:
             return {"status": "blocked", "message": f"Order ${notional} is outside the ${ceiling} ceiling."}
         if not self.configured:
@@ -222,7 +229,13 @@ class AlpacaBroker:
         }
 
 
-def build_broker(settings: Settings) -> Broker:
-    if settings.alpaca_key_id and settings.alpaca_secret_key:
-        return AlpacaBroker(settings)
+def broker_for(creds: Any, settings: Settings) -> Broker:
+    """The broker for one user, or NullBroker if they have not connected one."""
+    if creds is None:
+        return NullBroker()
+    if creds.provider == "alpaca":
+        if creds.live and not settings.allow_live_trading:
+            return NullBroker()  # live keys saved earlier stay inert while live is disabled
+        return AlpacaBroker(creds.key_id, creds.secret_key, live=creds.live,
+                            max_order_usd=settings.max_budget_usd)
     return NullBroker()

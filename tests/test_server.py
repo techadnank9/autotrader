@@ -1,6 +1,6 @@
 from fastapi.testclient import TestClient
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from ai_trader.server import app
 
@@ -41,22 +41,34 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(response.json()["execution"]["status"], "submitted")
         manage_portfolio.assert_called_once()
 
-    def test_portfolio_snapshot_endpoint(self) -> None:
-        snapshot_payload = {
-            "portfolio": {"total_value": 10, "buying_power": 5, "cash_available": 5},
-            "positions": [{"symbol": "AAPL", "market_value": 3.2, "quantity": 0.01}],
-            "warnings": [],
-        }
+    def test_portfolio_snapshot_never_falls_back_to_operator_account(self) -> None:
+        # Multi-user rule: a user without their own broker gets an empty snapshot.
+        # The local Codex/Robinhood session is one operator's account and must never
+        # be shown to other signed-in users.
+        with patch("ai_trader.server.trader.fetch_portfolio_snapshot") as operator_fetch:
+            response = self.client.get("/api/portfolio-snapshot")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["account_snapshot"]["source"], "none")
+        self.assertEqual(response.json()["account_snapshot"]["positions"], [])
+        operator_fetch.assert_not_called()
+
+    def test_portfolio_snapshot_uses_the_users_own_broker(self) -> None:
+        fake_broker = MagicMock()
+        fake_broker.configured = True
+        fake_broker.name = "alpaca"
+        fake_broker.account.return_value = {"total_value": 10, "buying_power": 5, "cash_available": 5}
+        fake_broker.positions.return_value = [{"symbol": "AAPL", "market_value": 3.2, "quantity": 0.01}]
+        fake_user = MagicMock(user_id="usr_1", is_demo=False)
         with (
-            patch("ai_trader.server.trader.fetch_portfolio_snapshot", return_value=snapshot_payload) as fetch,
-            patch("ai_trader.server.portfolio_engine.registry.list_agents", return_value={"current": "builtin-default-v1"}),
+            patch("ai_trader.server._current_user", return_value=fake_user),
+            patch("ai_trader.server._broker_for_user", return_value=fake_broker) as broker_for,
         ):
             response = self.client.get("/api/portfolio-snapshot")
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["account_snapshot"]["portfolio"]["total_value"], 10)
-        self.assertEqual(response.json()["meta"]["active_agent"], "builtin-default-v1")
-        fetch.assert_called_once()
+        broker_for.assert_called_once_with("usr_1")
 
     def test_portfolio_agent_endpoints(self) -> None:
         listed_payload = {"current": "builtin-default-v1", "previous": None, "eligible": []}

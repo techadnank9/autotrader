@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import secrets
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -10,7 +11,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from ai_trader.accounts import AccountError, SessionSigner, UserStore, demo_user
-from ai_trader.brokers import BrokerError, build_broker
+from ai_trader.brokers import AlpacaBroker, BrokerError, NullBroker, broker_for
+from ai_trader.credentials import BrokerCredentials, Cipher, CredentialError, FileCredentialStore
 from ai_trader.config import Settings
 from ai_trader.decisions import Decision, DecisionClosed, DecisionService, DecisionStore
 from ai_trader.engine import AnalysisRequest, DEFAULT_UNIVERSE, RecommendationEngine, SourceWeights
@@ -18,6 +20,7 @@ from ai_trader.portfolio_engine import ManagePortfolioRequest, PortfolioManageme
 from ai_trader.robinhood import RobinhoodTrader
 from ai_trader.sia import SIAService
 from ai_trader.telegram import TelegramClient, parse_callback
+from ai_trader import google_oauth
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
@@ -30,42 +33,51 @@ sia_service = SIAService(settings)
 telegram = TelegramClient(settings)
 
 
-broker = build_broker(settings)
-
-
 def _execute_decision(decision: Decision) -> dict[str, Any]:
     """The only path from an approved decision to a real order.
 
-    The decision id doubles as the broker's client_order_id, so even a duplicated
-    call cannot create a second order.
+    It trades through the broker belonging to the user who owns the decision.
+    There is no shared platform account. The decision id doubles as the broker's
+    client_order_id, so even a duplicated call cannot place a second order.
     """
-    if broker.configured:
-        return broker.place_notional_buy(
-            decision.symbol, Decimal(decision.amount_usd), client_order_id=decision.decision_id
-        )
-    return engine.trade(
-        {"symbol": decision.symbol, "dollar_amount": decision.amount_usd},
-        execute=True,
-        confirm_phrase="CONFIRM",
+    if not decision.user_id:
+        return {"status": "blocked", "message": "Decision has no owner, so no account to trade in."}
+    user_broker = _broker_for_user(decision.user_id)
+    if not user_broker.configured:
+        return {"status": "blocked", "message": "No broker connected. Connect Alpaca in Profile to trade."}
+    return user_broker.place_notional_buy(
+        decision.symbol, Decimal(decision.amount_usd), client_order_id=decision.decision_id
     )
 
 
 def _build_stores():
     """Postgres when DATABASE_URL is set, JSON files otherwise."""
+    cipher = Cipher(settings.credentials_encryption_key)
     if settings.database_url:
         try:
-            from ai_trader.db import Database, PostgresDecisionStore, PostgresUserStore
+            from ai_trader.db import Database, PostgresCredentialStore, PostgresDecisionStore, PostgresUserStore
 
             database = Database(settings.database_url)
-            return PostgresUserStore(database), PostgresDecisionStore(database), "postgres"
+            return (PostgresUserStore(database), PostgresDecisionStore(database),
+                    PostgresCredentialStore(database, cipher), "postgres")
         except Exception as exc:  # a broken DSN must not take the whole app down
             print(f"Postgres unavailable, falling back to file stores: {exc}")
-    return UserStore(settings.account_dir), DecisionStore(settings.decision_dir), "files"
+    return (UserStore(settings.account_dir), DecisionStore(settings.decision_dir),
+            FileCredentialStore(settings.account_dir, cipher), "files")
 
 
-users, decision_store, STORAGE_BACKEND = _build_stores()
+users, decision_store, credential_store, STORAGE_BACKEND = _build_stores()
 decisions = DecisionService(decision_store, executor=_execute_decision)
 sessions = SessionSigner(settings.session_secret)
+
+
+def _broker_for_user(user_id: str):
+    if user_id == "demo":
+        return NullBroker()
+    try:
+        return broker_for(credential_store.get(user_id, "alpaca"), settings)
+    except CredentialError:
+        return NullBroker()
 SESSION_COOKIE = "aitrader_session"
 
 
@@ -189,8 +201,9 @@ def config() -> dict[str, Any]:
         "capabilities": {
             "research_providers": engine.research.providers,
             "ranking_model": "claude-opus-5" if engine.ranker.enabled else None,
-            "broker": broker.name,
-            "broker_mode": ("live" if settings.alpaca_live else "paper") if broker.configured else None,
+            "credential_storage": Cipher(settings.credentials_encryption_key).ready,
+            "live_trading_allowed": settings.allow_live_trading,
+            "google_login": bool(settings.google_client_id and settings.google_client_secret),
             "telegram": telegram.configured,
         },
         "sia": sia_service.status(),
@@ -242,35 +255,31 @@ def manage_portfolio(payload: ManagePortfolioPayload) -> dict[str, Any]:
 
 
 @app.get("/api/portfolio-snapshot")
-def portfolio_snapshot() -> dict[str, Any]:
-    if broker.configured:
-        try:
-            snapshot = {
-                "agentic_account": {"account_number_masked": None},
-                "portfolio": broker.account(),
-                "positions": broker.positions(),
-                "warnings": [],
-                "source": broker.name,
-            }
-            snapshot["agentic_account"]["account_number_masked"] = snapshot["portfolio"].get("account_number_masked")
-        except BrokerError as exc:
-            snapshot = {"portfolio": {}, "positions": [], "warnings": [str(exc)], "source": broker.name}
-        return {"account_snapshot": snapshot, "meta": {"active_agent": portfolio_engine.registry.list_agents()["current"]}}
-    universe = DEFAULT_UNIVERSE[: settings.portfolio_candidate_pool_size]
-    snapshot = trader.fetch_portfolio_snapshot(universe)
-    return {
-        "account_snapshot": snapshot,
-        "meta": {
-            "active_agent": portfolio_engine.registry.list_agents()["current"],
-            "available_agent_setting": True,
-            "policy": {
-                "cash_reserve_usd": str(settings.portfolio_cash_reserve_usd),
-                "max_positions": settings.portfolio_max_positions,
-                "max_position_pct": str(settings.portfolio_max_position_pct),
-                "min_trade_usd": str(settings.portfolio_min_trade_usd),
-            },
-        },
-    }
+def portfolio_snapshot(aitrader_session: str | None = Cookie(default=None)) -> dict[str, Any]:
+    """The signed-in user's own brokerage account, or an empty snapshot.
+
+    There is deliberately no fallback to the local Codex/Robinhood session: that
+    is one operator's account, and falling back to it would show every signed-in
+    user someone else's brokerage.
+    """
+    user = _current_user(aitrader_session)
+    broker = _broker_for_user(user.user_id) if user else NullBroker()
+    meta = {"active_agent": portfolio_engine.registry.list_agents()["current"]}
+    if not broker.configured:
+        empty = {"portfolio": {}, "positions": [], "warnings": [], "source": "none"}
+        return {"account_snapshot": empty, "meta": meta}
+    try:
+        portfolio = broker.account()
+        snapshot = {
+            "agentic_account": {"account_number_masked": portfolio.get("account_number_masked")},
+            "portfolio": portfolio,
+            "positions": broker.positions(),
+            "warnings": [],
+            "source": broker.name,
+        }
+    except BrokerError as exc:
+        snapshot = {"portfolio": {}, "positions": [], "warnings": [str(exc)], "source": broker.name}
+    return {"account_snapshot": snapshot, "meta": meta}
 
 
 @app.get("/api/portfolio-agents")
@@ -339,7 +348,8 @@ def answer_decision(
     user = _require_user(aitrader_session)
     try:
         decision = decisions.answer(
-            payload.decision_id, approved=payload.approved, responder=f"dashboard:{user.user_id}"
+            payload.decision_id, approved=payload.approved,
+            responder=f"dashboard:{user.user_id}", user_id=user.user_id,
         )
     except DecisionClosed as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -353,10 +363,10 @@ def telegram_status() -> dict[str, Any]:
 
 @app.get("/api/decisions")
 def list_decisions(aitrader_session: str | None = Cookie(default=None)) -> dict[str, Any]:
-    _require_user(aitrader_session)
+    user = _require_user(aitrader_session)
     return {
-        "open": [d.to_dict() for d in decision_store.open_decisions()],
-        "recent": [d.to_dict() for d in decision_store.list(limit=20)],
+        "open": [d.to_dict() for d in decision_store.open_decisions(user_id=user.user_id)],
+        "recent": [d.to_dict() for d in decision_store.list(user_id=user.user_id, limit=50)],
     }
 
 
@@ -366,7 +376,7 @@ def propose_decision(
     aitrader_session: str | None = Cookie(default=None),
 ) -> dict[str, Any]:
     """Run the research pass and propose at most one decision."""
-    _require_user(aitrader_session)
+    user = _require_user(aitrader_session)
     try:
         budget = Decimal(payload.budget) if payload.budget else settings.default_budget_usd
     except InvalidOperation as exc:
@@ -386,6 +396,7 @@ def propose_decision(
 
     try:
         decision = decisions.propose(
+            user_id=user.user_id,
             symbol=str(recommendation["symbol"]),
             side="buy",
             amount_usd=amount,
@@ -397,20 +408,13 @@ def propose_decision(
     except DecisionClosed as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    delivery: dict[str, Any] = {"sent": False}
-    if payload.notify and telegram.configured:
-        result = telegram.send_decision(decision)
-        delivery = {"sent": bool(result.get("ok")), "detail": result.get("description")}
-        if result.get("ok"):
-            message = result.get("result") or {}
-            decision.delivery = {
-                "channel": "telegram",
-                "chat_id": (message.get("chat") or {}).get("id"),
-                "message_id": message.get("message_id"),
-            }
-            decision_store.save(decision)
-    elif payload.notify:
-        delivery = {"sent": False, "detail": "Telegram is not configured."}
+    # Telegram is configured with one chat, but decisions now belong to individual
+    # users. Sending here would deliver every user's card to that one chat, so
+    # delivery waits for per-user Telegram linking rather than leak across users.
+    delivery: dict[str, Any] = {
+        "sent": False,
+        "detail": "Telegram delivery needs per-user linking; approve from the dashboard for now.",
+    }
 
     return {"status": "proposed", "decision": decision.to_dict(), "delivery": delivery}
 
@@ -507,26 +511,149 @@ def auth_logout(response: Response) -> dict[str, Any]:
     return {"ok": True}
 
 
+class AlpacaConnectPayload(BaseModel):
+    key_id: str = Field(min_length=8, max_length=128)
+    secret_key: str = Field(min_length=16, max_length=256)
+    live: bool = False
+    confirm_live: bool = False
+
+
 @app.get("/api/broker/status")
-def broker_status() -> dict[str, Any]:
-    return broker.status()
+def broker_status(aitrader_session: str | None = Cookie(default=None)) -> dict[str, Any]:
+    user = _require_user(aitrader_session)
+    summary = None
+    try:
+        summary = credential_store.summary(user.user_id, "alpaca")
+    except CredentialError:
+        pass
+    status = _broker_for_user(user.user_id).status()
+    return {
+        **status,
+        "saved": summary,
+        "demo": user.is_demo,
+        "can_connect": (not user.is_demo) and Cipher(settings.credentials_encryption_key).ready,
+        "live_trading_allowed": settings.allow_live_trading,
+    }
+
+
+@app.post("/api/broker/alpaca")
+def connect_alpaca(payload: AlpacaConnectPayload, aitrader_session: str | None = Cookie(default=None)) -> dict[str, Any]:
+    """Connect the signed-in user's own Alpaca account.
+
+    The keys are checked against Alpaca before anything is stored, and the secret
+    is encrypted at rest and never returned.
+    """
+    user = _require_user(aitrader_session)
+    if user.is_demo:
+        raise HTTPException(status_code=403, detail="Demo sessions are shared, so they cannot connect a broker. Create an account first.")
+    if payload.live and not settings.allow_live_trading:
+        raise HTTPException(status_code=403, detail="Live trading is not enabled on this platform. Connect a paper account.")
+    if payload.live and not payload.confirm_live:
+        raise HTTPException(status_code=400, detail="Confirm that approved orders will use real money.")
+
+    key_id, secret = payload.key_id.strip(), payload.secret_key.strip()
+    try:
+        account = AlpacaBroker(key_id, secret, live=payload.live, max_order_usd=settings.max_budget_usd).verify()
+    except BrokerError as exc:
+        hint = " These look like paper keys; choose Paper." if (payload.live and key_id.startswith("PK")) else ""
+        raise HTTPException(status_code=400, detail=f"{exc}{hint}") from exc
+
+    try:
+        credential_store.save(user.user_id, BrokerCredentials("alpaca", key_id, secret, payload.live))
+    except CredentialError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"connected": True, "mode": "live" if payload.live else "paper", "account": account,
+            "saved": credential_store.summary(user.user_id, "alpaca")}
+
+
+@app.delete("/api/broker/alpaca")
+def disconnect_alpaca(aitrader_session: str | None = Cookie(default=None)) -> dict[str, Any]:
+    user = _require_user(aitrader_session)
+    try:
+        removed = credential_store.delete(user.user_id, "alpaca")
+    except CredentialError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"disconnected": removed}
 
 
 @app.get("/api/portfolio/history")
 def portfolio_history(period: str = "1M", aitrader_session: str | None = Cookie(default=None)) -> dict[str, Any]:
-    _require_user(aitrader_session)
+    user = _require_user(aitrader_session)
     if period not in {"1D", "1W", "1M", "3M", "1A"}:
         raise HTTPException(status_code=400, detail="period must be one of 1D, 1W, 1M, 3M, 1A")
     try:
-        return broker.portfolio_history(period)
+        return _broker_for_user(user.user_id).portfolio_history(period)
     except BrokerError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @app.get("/api/orders")
 def list_orders(aitrader_session: str | None = Cookie(default=None)) -> dict[str, Any]:
-    _require_user(aitrader_session)
+    user = _require_user(aitrader_session)
+    broker = _broker_for_user(user.user_id)
     try:
         return {"broker": broker.name, "orders": broker.recent_orders()}
     except BrokerError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+OAUTH_COOKIE = "aitrader_oauth"
+
+
+def _google_redirect_uri(request: Request) -> str:
+    base = settings.public_base_url or str(request.base_url).rstrip("/")
+    return f"{base}/auth/google/callback"
+
+
+def _login_error(message: str) -> RedirectResponse:
+    from urllib.parse import quote
+
+    return RedirectResponse(f"/login?error={quote(message)}", status_code=303)
+
+
+@app.get("/auth/google")
+def google_start(request: Request):
+    if not (settings.google_client_id and settings.google_client_secret):
+        return _login_error("Google sign-in is not configured yet.")
+    state, verifier, challenge = google_oauth.new_flow()
+    response = RedirectResponse(
+        google_oauth.authorize_url(settings.google_client_id, _google_redirect_uri(request), state, challenge),
+        status_code=303,
+    )
+    # state + PKCE verifier, signed so they cannot be forged, valid for 10 minutes.
+    response.set_cookie(
+        OAUTH_COOKIE, sessions.issue(f"{state}.{verifier}", ttl=600),
+        max_age=600, httponly=True, samesite="lax", secure=settings.session_secure_cookie, path="/auth",
+    )
+    return response
+
+
+@app.get("/auth/google/callback")
+def google_callback(
+    request: Request,
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+    aitrader_oauth: str | None = Cookie(default=None),
+):
+    if error:
+        return _login_error("Google sign-in was cancelled.")
+    held = sessions.verify(aitrader_oauth)
+    if not held or not code or not state or "." not in held:
+        return _login_error("Sign-in expired. Please try again.")
+    expected_state, verifier = held.split(".", 1)
+    if not secrets.compare_digest(expected_state, state):
+        return _login_error("Sign-in could not be verified. Please try again.")
+    try:
+        profile = google_oauth.exchange(
+            settings.google_client_id, settings.google_client_secret,
+            _google_redirect_uri(request), code, verifier,
+        )
+    except google_oauth.GoogleAuthError as exc:
+        return _login_error(str(exc))
+
+    user = users.get_or_create_verified(profile["email"], "google")
+    response = RedirectResponse("/app", status_code=303)
+    _set_session(response, user.user_id)
+    response.delete_cookie(OAUTH_COOKIE, path="/auth")
+    return response

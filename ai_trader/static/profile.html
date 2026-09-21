@@ -8,8 +8,8 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/static/app.css">
-<link rel="stylesheet" href="/static/dashboard.css">
+<link rel="stylesheet" href="/static/app.css?v=202609211129">
+<link rel="stylesheet" href="/static/dashboard.css?v=202609211129">
 <style>
   .conn{margin-top:18px;display:flex;flex-direction:column}
   .conn-row{display:grid;grid-template-columns:150px 1fr auto;gap:16px;padding:15px 0;border-top:1px solid var(--line);align-items:center}
@@ -22,6 +22,16 @@
   .pill.on i{background:var(--accent)}
   .pill.warn{background:#2b2312;color:#f2cf86}
   .pill.warn i{background:#e0a93a}
+  .bk-form{margin-top:18px;max-width:460px}
+  .mode{display:flex;gap:4px;padding:4px;background:var(--ink);border:1px solid var(--line);border-radius:11px;margin-top:16px}
+  .mode button{flex:1;padding:9px;border:0;border-radius:8px;background:transparent;color:var(--text-2);font-family:inherit;font-size:14px;font-weight:600;cursor:pointer}
+  .mode button[aria-pressed="true"]{background:var(--surface-2);color:var(--text)}
+  .mode button[disabled]{opacity:.4;cursor:not-allowed}
+  .check{display:flex;gap:10px;align-items:flex-start;margin-top:14px;font-size:13.5px;color:var(--text-2)}
+  .check input{margin-top:3px;accent-color:var(--accent)}
+  .help{margin-top:12px;font-size:13px;color:var(--text-3);line-height:1.6}
+  .help a{color:var(--text-2)}
+  .bk-live{display:flex;flex-wrap:wrap;gap:12px 28px;margin-top:16px;align-items:center}
   @media (max-width:880px){.conn-row{grid-template-columns:1fr auto}.conn-detail{grid-column:1 / -1;order:3}}
 </style>
 </head>
@@ -45,6 +55,12 @@
   <section class="call">
     <h1 style="font-size:20px">Profile</h1>
     <dl class="stats" id="me"></dl>
+  </section>
+
+  <section class="panel" aria-labelledby="bk-h">
+    <h2 id="bk-h">Brokerage</h2>
+    <p class="panel-sub">Connect your own Alpaca account. Approved calls are placed there, and only there.</p>
+    <div id="bk"><p class="empty">Checking…</p></div>
   </section>
 
   <section class="panel" aria-labelledby="conn-h">
@@ -75,6 +91,83 @@
     return '<div class="conn-row"><span class="conn-name">'+esc(name)+'</span><span class="conn-detail">'+esc(detail)+'</span><span class="pill '+cls+'"><i></i>'+label+'</span></div>';
   }
 
+
+  var mode = "paper";
+  async function renderBroker(){
+    var b;
+    try { b = await api("/api/broker/status"); } catch(e){ $("bk").innerHTML='<p class="empty">Could not check your brokerage.</p>'; return; }
+
+    if (b.demo) {
+      $("bk").innerHTML = '<p class="empty">Demo sessions are shared between visitors, so they cannot hold brokerage keys. <a href="/login">Create an account</a> to connect Alpaca.</p>';
+      return;
+    }
+    if (b.saved) {
+      var s = b.saved;
+      $("bk").innerHTML =
+        '<div class="bk-live">' +
+          '<span class="pill ' + (b.connected ? "on" : "warn") + '"><i></i>' + (b.connected ? "Connected" : "Needs attention") + '</span>' +
+          '<span class="conn-detail">Alpaca ' + esc(s.live ? "live" : "paper") + ' · key <span class="mono">' + esc(s.masked_key_id) + '</span>' +
+          (b.connected && b.buying_power ? ' · buying power ' + money(b.buying_power) : '') + '</span>' +
+          '<button class="btn btn-ghost btn-sm" id="bk-off" type="button">Disconnect</button>' +
+        '</div>' +
+        (b.connected ? '' : '<p class="err">' + esc(b.message || "") + '</p>');
+      $("bk-off").onclick = async function(){
+        if (!confirm("Disconnect Alpaca? Approved calls will stop placing orders until you reconnect.")) return;
+        this.disabled = true;
+        try { await api("/api/broker/alpaca", {method:"DELETE"}); } catch(e){}
+        renderBroker(); renderConnections();
+      };
+      return;
+    }
+    if (!b.can_connect) {
+      $("bk").innerHTML = '<p class="empty">Broker connections are not enabled on this server yet.</p>';
+      return;
+    }
+
+    $("bk").innerHTML =
+      '<form class="bk-form" id="bk-form" novalidate>' +
+        '<div class="mode" role="group" aria-label="Account type">' +
+          '<button type="button" data-m="paper" aria-pressed="true">Paper</button>' +
+          '<button type="button" data-m="live"' + (b.live_trading_allowed ? '' : ' disabled title="Live trading is not enabled on this platform"') + '>Live</button>' +
+        '</div>' +
+        '<label class="field"><span>API key ID</span><input id="bk-key" autocomplete="off" spellcheck="false" placeholder="PK…"></label>' +
+        '<label class="field"><span>Secret key</span><input id="bk-secret" type="password" autocomplete="off" spellcheck="false"></label>' +
+        '<label class="check" id="bk-live-wrap" hidden><input type="checkbox" id="bk-confirm"> <span>I understand approved calls will place orders with real money.</span></label>' +
+        '<p class="err" id="bk-err" role="alert"></p>' +
+        '<button class="btn btn-primary" id="bk-go" type="submit">Connect Alpaca</button>' +
+        '<p class="help">Find these at <a href="https://app.alpaca.markets" target="_blank" rel="noopener">app.alpaca.markets</a> → Paper account → API Keys. ' +
+        'We check the keys with Alpaca before saving. Your secret is encrypted and never shown again.' +
+        (b.live_trading_allowed ? '' : ' Live accounts are not enabled on this platform yet.') + '</p>' +
+      '</form>';
+
+    Array.prototype.forEach.call(document.querySelectorAll(".mode button"), function(btn){
+      btn.onclick = function(){
+        if (btn.disabled) return;
+        mode = btn.dataset.m;
+        Array.prototype.forEach.call(document.querySelectorAll(".mode button"), function(o){ o.setAttribute("aria-pressed", String(o===btn)); });
+        $("bk-live-wrap").hidden = mode !== "live";
+      };
+    });
+    ["bk-key","bk-secret"].forEach(function(id){ $(id).addEventListener("input", function(){ $("bk-err").textContent=""; }); });
+
+    $("bk-form").addEventListener("submit", async function(e){
+      e.preventDefault();
+      var key = $("bk-key").value.trim(), secret = $("bk-secret").value.trim();
+      if (!key) { $("bk-err").textContent = "Enter your API key ID."; $("bk-key").focus(); return; }
+      if (!secret) { $("bk-err").textContent = "Enter your secret key."; $("bk-secret").focus(); return; }
+      if (mode==="live" && !$("bk-confirm").checked) { $("bk-err").textContent = "Confirm that live orders use real money."; return; }
+      var go = $("bk-go"); go.disabled = true; go.textContent = "Checking with Alpaca…";
+      try {
+        await api("/api/broker/alpaca", {method:"POST", headers:{"content-type":"application/json"},
+          body: JSON.stringify({key_id:key, secret_key:secret, live: mode==="live", confirm_live: $("bk-confirm").checked})});
+        $("bk-secret").value = "";
+        renderBroker(); renderConnections();
+      } catch(err) {
+        $("bk-err").textContent = err.message; go.disabled = false; go.textContent = "Connect Alpaca";
+      }
+    });
+  }
+
   async function boot(){
     var me;
     try{ me=await api("/api/auth/me"); }catch(e){ location.href="/login"; return; }
@@ -87,13 +180,18 @@
       stat("User id", u.user_id, true);
     $("signout").onclick=async function(){ try{await api("/api/auth/logout",{method:"POST"})}catch(e){} location.href="/login"; };
 
+    renderBroker();
+    renderConnections();
+  }
+
+  async function renderConnections(){
     var cfg={}, cap={};
     try{ cfg=await api("/api/config"); cap=cfg.capabilities||{}; }catch(e){}
     var rows=[];
 
     try{
       var b=await api("/api/broker/status");
-      if(!b.configured) rows.push(row("Broker", "off", "Add Alpaca paper keys to place orders. Approvals return blocked until then."));
+      if(!b.configured) rows.push(row("Broker", "off", "Connect your Alpaca account above. Approvals return blocked until then."));
       else if(!b.connected) rows.push(row("Broker", "warn", "Alpaca keys are set but the check failed: "+b.message));
       else rows.push(row("Broker", b.trading_blocked?"warn":"on",
         "Alpaca "+b.mode+" · buying power "+money(b.buying_power)+" · market "+(b.market_open?"open":"closed")));

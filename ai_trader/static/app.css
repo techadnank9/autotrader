@@ -18,6 +18,7 @@ h1,h2,h3{margin:0;font-weight:600;letter-spacing:-.03em;line-height:1.05;text-wr
 p{margin:0}
 a{color:inherit}
 .mono{font-family:var(--mono);font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+[hidden]{display:none !important}
 .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
 
 .btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;background:transparent;padding:12px 20px;border-radius:10px;font-family:inherit;font-size:15px;font-weight:600;letter-spacing:-.01em;text-decoration:none;cursor:pointer;border:1px solid transparent;transition:transform .18s var(--ease),background-color .2s,border-color .2s,color .2s}

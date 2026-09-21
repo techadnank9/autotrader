@@ -42,6 +42,17 @@ CREATE TABLE IF NOT EXISTS decisions (
     payload     JSONB NOT NULL
 );
 CREATE INDEX IF NOT EXISTS decisions_created_at_idx ON decisions (created_at DESC);
+ALTER TABLE decisions ADD COLUMN IF NOT EXISTS user_id TEXT;
+CREATE INDEX IF NOT EXISTS decisions_user_idx ON decisions (user_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS broker_credentials (
+    user_id       TEXT NOT NULL,
+    provider      TEXT NOT NULL,
+    masked_key_id TEXT NOT NULL,
+    live          BOOLEAN NOT NULL,
+    connected_at  DOUBLE PRECISION NOT NULL,
+    ciphertext    TEXT NOT NULL,
+    PRIMARY KEY (user_id, provider)
+);
 """
 
 
@@ -103,6 +114,24 @@ class PostgresUserStore:
             user_id=str(row["user_id"]), email=str(row["email"]), created_at=float(row["created_at"])
         )
 
+    def get_or_create_verified(self, email: str, provider: str) -> User:
+        import secrets
+
+        email = normalize_email(email)
+        with self.db.connect() as conn, conn.cursor() as cur:
+            cur.execute("SELECT * FROM users WHERE email = %s", (email,))
+            row = cur.fetchone()
+            if row:
+                return User(user_id=str(row["user_id"]), email=str(row["email"]),
+                            created_at=float(row["created_at"]))
+            user = User(user_id=f"usr_{secrets.token_hex(8)}", email=email, created_at=time.time())
+            cur.execute(
+                "INSERT INTO users (user_id, email, password, created_at) VALUES (%s, %s, %s, %s)",
+                (user.user_id, email, f"oauth${provider}", user.created_at),
+            )
+            conn.commit()
+        return user
+
     def count(self) -> int:
         with self.db.connect() as conn, conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) AS n FROM users")
@@ -120,13 +149,13 @@ class PostgresDecisionStore:
         with self.db.connect() as conn, conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO decisions (decision_id, status, created_at, payload)
-                VALUES (%s, %s, %s, %s)
+                INSERT INTO decisions (decision_id, status, created_at, payload, user_id)
+                VALUES (%s, %s, %s, %s, %s)
                 ON CONFLICT (decision_id)
                 DO UPDATE SET status = EXCLUDED.status, payload = EXCLUDED.payload
                 """,
                 (decision.decision_id, decision.status, decision.created_at,
-                 json.dumps(decision.to_dict())),
+                 json.dumps(decision.to_dict()), decision.user_id),
             )
             conn.commit()
         return decision
@@ -137,17 +166,21 @@ class PostgresDecisionStore:
             row = cur.fetchone()
         return Decision.from_dict(row["payload"]) if row else None
 
-    def list(self, *, limit: int = 50) -> list[Decision]:
+    def list(self, *, user_id: str | None = None, limit: int = 50) -> list[Decision]:
         with self.db.connect() as conn, conn.cursor() as cur:
-            cur.execute(
-                "SELECT payload FROM decisions ORDER BY created_at DESC LIMIT %s", (limit,)
-            )
+            if user_id is None:
+                cur.execute("SELECT payload FROM decisions ORDER BY created_at DESC LIMIT %s", (limit,))
+            else:
+                cur.execute(
+                    "SELECT payload FROM decisions WHERE user_id = %s ORDER BY created_at DESC LIMIT %s",
+                    (user_id, limit),
+                )
             rows = cur.fetchall()
         return [Decision.from_dict(r["payload"]) for r in rows]
 
-    def open_decisions(self) -> list[Decision]:
+    def open_decisions(self, *, user_id: str | None = None) -> list[Decision]:
         live: list[Decision] = []
-        for decision in self.list():
+        for decision in self.list(user_id=user_id):
             if decision.status != "pending":
                 continue
             if decision.is_expired():
@@ -180,3 +213,55 @@ def healthcheck(db: Database) -> dict[str, Any]:
         return {"connected": True}
     except Exception as exc:
         return {"connected": False, "error": str(exc)[:300]}
+
+
+class PostgresCredentialStore:
+    """Same interface as FileCredentialStore; ciphertext only, never the secret."""
+
+    def __init__(self, db: Database, cipher: Any) -> None:
+        self.db = db
+        self.cipher = cipher
+
+    def save(self, user_id: str, creds: Any) -> None:
+        from ai_trader.credentials import _record
+
+        rec = _record(creds, self.cipher)
+        with self.db.connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO broker_credentials (user_id, provider, masked_key_id, live, connected_at, ciphertext)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (user_id, provider) DO UPDATE SET
+                  masked_key_id = EXCLUDED.masked_key_id, live = EXCLUDED.live,
+                  connected_at = EXCLUDED.connected_at, ciphertext = EXCLUDED.ciphertext
+                """,
+                (user_id, rec["provider"], rec["masked_key_id"], rec["live"], rec["connected_at"], rec["ciphertext"]),
+            )
+            conn.commit()
+
+    def _row(self, user_id: str, provider: str) -> dict[str, Any] | None:
+        with self.db.connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT * FROM broker_credentials WHERE user_id = %s AND provider = %s", (user_id, provider)
+            )
+            return cur.fetchone()
+
+    def get(self, user_id: str, provider: str) -> Any:
+        from ai_trader.credentials import _decode
+
+        row = self._row(user_id, provider)
+        return _decode(provider, row, self.cipher) if row else None
+
+    def summary(self, user_id: str, provider: str) -> dict[str, Any] | None:
+        row = self._row(user_id, provider)
+        if not row:
+            return None
+        return {"provider": provider, "masked_key_id": row["masked_key_id"],
+                "live": bool(row["live"]), "connected_at": float(row["connected_at"])}
+
+    def delete(self, user_id: str, provider: str) -> bool:
+        with self.db.connect() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM broker_credentials WHERE user_id = %s AND provider = %s", (user_id, provider))
+            deleted = cur.rowcount > 0
+            conn.commit()
+        return deleted

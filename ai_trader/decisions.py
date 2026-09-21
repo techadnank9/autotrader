@@ -44,6 +44,7 @@ class Decision:
     execution: dict[str, Any] | None = None
     delivery: dict[str, Any] = field(default_factory=dict)
     policy: dict[str, Any] = field(default_factory=dict)
+    user_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -92,24 +93,28 @@ class DecisionStore:
             return None
         return Decision.from_dict(payload)
 
-    def list(self, *, limit: int = 50) -> list[Decision]:
+    def list(self, *, user_id: str | None = None, limit: int = 50) -> list[Decision]:
         if not self.root.exists():
             return []
         decisions: list[Decision] = []
-        for path in sorted(self.root.glob("*.json"), reverse=True)[:limit]:
+        for path in sorted(self.root.glob("*.json"), reverse=True):
             try:
                 payload = json.loads(path.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError):
                 continue
-            if isinstance(payload, dict):
-                decisions.append(Decision.from_dict(payload))
+            if not isinstance(payload, dict):
+                continue
+            decision = Decision.from_dict(payload)
+            if user_id is not None and decision.user_id != user_id:
+                continue
+            decisions.append(decision)
         decisions.sort(key=lambda d: d.created_at, reverse=True)
-        return decisions
+        return decisions[:limit]
 
-    def open_decisions(self) -> list[Decision]:
+    def open_decisions(self, *, user_id: str | None = None) -> list[Decision]:
         """Pending and not yet expired. Expiry is applied lazily on read."""
         live: list[Decision] = []
-        for decision in self.list():
+        for decision in self.list(user_id=user_id):
             if decision.status != PENDING:
                 continue
             if decision.is_expired():
@@ -130,6 +135,7 @@ class DecisionStore:
         evidence: list[str] | None = None,
         ttl_minutes: int = 240,
         policy: dict[str, Any] | None = None,
+        user_id: str | None = None,
     ) -> Decision:
         created = _now()
         decision = Decision(
@@ -143,6 +149,7 @@ class DecisionStore:
             created_at=created.isoformat(),
             expires_at=(created + timedelta(minutes=ttl_minutes)).isoformat(),
             policy=policy or {},
+            user_id=user_id,
         )
         return self.save(decision)
 
@@ -169,18 +176,22 @@ class DecisionService:
         self.executor = executor
         self.max_open = max_open
 
-    def propose(self, **kwargs: Any) -> Decision:
-        open_now = self.store.open_decisions()
+    def propose(self, *, user_id: str | None = None, **kwargs: Any) -> Decision:
+        open_now = self.store.open_decisions(user_id=user_id)
         if len(open_now) >= self.max_open:
             raise DecisionClosed(
                 f"{len(open_now)} decision(s) already awaiting an answer; "
                 "answer or let them expire before proposing another."
             )
-        return self.store.create(**kwargs)
+        return self.store.create(user_id=user_id, **kwargs)
 
-    def answer(self, decision_id: str, *, approved: bool, responder: str) -> Decision:
+    def answer(
+        self, decision_id: str, *, approved: bool, responder: str, user_id: str | None = None
+    ) -> Decision:
         decision = self.store.get(decision_id)
-        if decision is None:
+        # Someone else's decision is reported exactly like a missing one, so ids
+        # cannot be probed to learn what other users were proposed.
+        if decision is None or (user_id is not None and decision.user_id != user_id):
             raise DecisionClosed("That decision no longer exists.")
         if decision.status != PENDING:
             raise DecisionClosed(f"That decision was already {decision.status}.")

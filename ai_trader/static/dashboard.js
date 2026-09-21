@@ -227,8 +227,11 @@
       var parts = [
         "Research: " + (c2.research_providers && c2.research_providers.length ? c2.research_providers.join(" + ") : "not connected"),
         "Ranking: " + (c2.ranking_model || "not connected"),
-        "Broker: " + (c2.broker && c2.broker !== "none" ? c2.broker + " (" + c2.broker_mode + ")" : "not connected")
       ];
+      try {
+        var bs = await api("/api/broker/status");
+        parts.push("Broker: " + (bs.connected ? "Alpaca (" + bs.mode + ")" : "not connected"));
+      } catch (e) { parts.push("Broker: unknown"); }
       $("delivery").insertAdjacentHTML("beforebegin", '<p class="delivery">' + esc(parts.join(" · ")) + '</p>');
     } catch (e) {}
     try {
@@ -352,14 +355,13 @@
   async function loadEquity() {
     $("chart").innerHTML = '<p class="empty">Loading…</p>';
     try {
-      var cfg = await api("/api/config");
-      var cap = cfg.capabilities || {};
-      if (cap.broker === "none") {
-        $("chart").innerHTML = '<p class="empty">No broker connected. Once Alpaca is connected, your account value is charted here.</p>';
-        $("perf-sub").textContent = "Connect a broker to see your real account value.";
+      var b = await api("/api/broker/status");
+      if (!b.configured || !b.connected) {
+        $("chart").innerHTML = '<p class="empty">No broker connected. <a href="/profile">Connect your Alpaca account</a> to chart your account value.</p>';
+        $("perf-sub").textContent = "Your own brokerage account, once connected.";
         return;
       }
-      $("perf-sub").textContent = "From your " + cap.broker + " " + (cap.broker_mode || "") + " account.";
+      $("perf-sub").textContent = "From your Alpaca " + b.mode + " account.";
       renderEquity(await api("/api/portfolio/history?period=" + period));
     } catch (err) {
       $("chart").innerHTML = '<p class="empty">Could not load account history: ' + esc(err.message) + '</p>';
@@ -394,7 +396,7 @@
       var data = await api("/api/orders");
       var orders = data.orders || [];
       if (data.broker === "none") {
-        $("trades").innerHTML = '<p class="empty">No broker connected yet, so no orders have been placed.</p>';
+        $("trades").innerHTML = '<p class="empty">No broker connected yet. <a href="/profile">Connect Alpaca</a> and your approved orders appear here.</p>';
         return;
       }
       $("trades").innerHTML = orders.length

@@ -156,6 +156,25 @@ class UserStore:
     def count(self) -> int:
         return len(self._read())
 
+    def get_or_create_verified(self, email: str, provider: str) -> User:
+        """Sign in with an identity provider that has verified the email.
+
+        An existing account with the same email is reused: the provider has proven
+        the person controls that inbox. New accounts get a password marker that
+        can never verify, so they are sign-in-with-provider only.
+        """
+        email = normalize_email(email)
+        data = self._read()
+        record = data.get(email)
+        if record:
+            return User(user_id=str(record["user_id"]), email=email,
+                        created_at=float(record.get("created_at", 0)))
+        user = User(user_id=f"usr_{secrets.token_hex(8)}", email=email, created_at=time.time())
+        data[email] = {"user_id": user.user_id, "email": email, "created_at": user.created_at,
+                       "password": f"oauth${provider}"}
+        self._write(data)
+        return user
+
 
 def demo_user() -> User:
     return User(user_id=DEMO_USER_ID, email="demo@aitrader.local", created_at=0.0, is_demo=True)
