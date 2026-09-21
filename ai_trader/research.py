@@ -84,6 +84,33 @@ class Claim:
         }
 
 
+# Pages that are not news: quote hubs, headline indexes, options chains, 13F
+# filler, and promotional projections. Their generic titles look alike across
+# sites, so if they reach clustering they masquerade as independently
+# corroborated claims, which is exactly the signal the ranker trusts most.
+_NOT_NEWS_TITLE = re.compile(
+    r"("
+    r"\(\s*\$?[a-z.]{1,6}\s*\)\s*stock price"                       # "Amazon.com (AMZN) Stock Price ..."
+    r"|stock price\s*(&|,|and)\s*(news|overview|quote|history|chart)"  # "Stock Price, News, Quote & History"
+    r"|\bstock quotes?\b|quotes? (&|and) news|\|\s*quotes?\b"          # quote hubs
+    r"|latest stock news|news (&|and) headlines|\bnews today\b"         # headline indexes
+    r"|options chain"
+    r"|\bshares? (in|of) .{1,60}\b(bought|sold|acquired) by\b"          # 13F filler
+    r"|\bcould grow to\b"                                              # promotional projections
+    r")",
+    re.IGNORECASE,
+)
+_NOT_NEWS_URL = re.compile(
+    r"(/quote/|/quotes/|/symbol/|/market-activity/stocks/[a-z.]+/?$|/stocks/[a-z.]+/?$|"
+    r"/stock/[a-z.]+/?$|/options|/news/?$|/chart)",
+    re.IGNORECASE,
+)
+
+
+def is_news(ev: "Evidence") -> bool:
+    return not (_NOT_NEWS_TITLE.search(ev.title) or _NOT_NEWS_URL.search(urlparse(ev.url).path))
+
+
 def _domain(url: str) -> str:
     host = urlparse(url).netloc.lower()
     return host[4:] if host.startswith("www.") else host
@@ -229,7 +256,8 @@ class ResearchService:
 
     def collect(self, symbols: list[str]) -> dict[str, Any]:
         symbols = [s.upper() for s in symbols]
-        evidence, errors = asyncio.run(self._collect_async(symbols))
+        fetched, errors = asyncio.run(self._collect_async(symbols))
+        evidence = [e for e in fetched if is_news(e)]
         claims = self.cluster(evidence)
         by_symbol: dict[str, list[dict[str, Any]]] = {s: [] for s in symbols}
         for claim in claims:
@@ -239,6 +267,7 @@ class ResearchService:
             "providers": self.providers,
             "symbols": symbols,
             "raw_hits": len(evidence),
+            "filtered_out": len(fetched) - len(evidence),
             "claim_count": len(claims),
             "claims": by_symbol,
             "errors": errors,

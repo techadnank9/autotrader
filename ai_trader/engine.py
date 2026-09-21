@@ -407,6 +407,8 @@ class RecommendationEngine:
         return [
             {"stage": "research", "title": "Live news pulled",
              "detail": f"{research['raw_hits']} articles from {', '.join(research['providers'])}"
+                       + (f", after removing {research.get('filtered_out', 0)} quote, index and promotional pages"
+                          if research.get('filtered_out') else "")
                        + (f"; {len(errors)} request(s) failed." if errors else ".")},
             {"stage": "dedupe", "title": "Collapsed into claims",
              "detail": f"{research['raw_hits']} articles became {research['claim_count']} distinct claims. "
