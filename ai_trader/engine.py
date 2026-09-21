@@ -370,7 +370,8 @@ class RecommendationEngine:
     @staticmethod
     def _no_trade(pool: list[str], why: str) -> dict[str, Any]:
         return {
-            "pool": [{"symbol": s, "score": 0.0, "reason": why, "claim_ids": []} for s in pool],
+            "pool": [{"symbol": s, "verdict": "watch", "score": 0.0, "reason": why, "summary": why,
+                      "risks": [], "claim_ids": []} for s in pool],
             "recommendation": {"decision": "no_trade", "symbol": None, "confidence": 0.0,
                                "rationale": why, "risks": []},
         }
@@ -388,8 +389,11 @@ class RecommendationEngine:
             corroborated = sum(c["independent_sources"] for c in cs)
             rows.append({
                 "symbol": symbol,
+                "verdict": "watch",
                 "score": round(min(corroborated / 12.0, 1.0), 4),
-                "reason": f"{len(cs)} distinct claim(s) from {corroborated} independent source(s). Unranked: {why}",
+                "reason": f"{len(cs)} news stories today; not yet analyzed.",
+                "summary": f"{len(cs)} news stories today; not yet analyzed.",
+                "risks": [],
                 "claim_ids": [c["claim_id"] for c in cs][:5],
             })
         rows.sort(key=lambda r: r["score"], reverse=True)
@@ -406,15 +410,14 @@ class RecommendationEngine:
         errors = research.get("errors") or []
         return [
             {"stage": "research", "title": "Live news pulled",
-             "detail": f"{research['raw_hits']} articles from {', '.join(research['providers'])}"
-                       + (f", after removing {research.get('filtered_out', 0)} quote, index and promotional pages"
-                          if research.get('filtered_out') else "")
-                       + (f"; {len(errors)} request(s) failed." if errors else ".")},
+             "detail": f"Read {research['raw_hits']} news articles from today"
+                       + (f", ignoring {research.get('filtered_out', 0)} price-quote and promotional pages"
+                          if research.get('filtered_out') else "") + "."},
             {"stage": "dedupe", "title": "Collapsed into claims",
              "detail": f"{research['raw_hits']} articles became {research['claim_count']} distinct claims. "
                        "Syndicated copies of one story count once."},
             {"stage": "ranking", "title": "Ranked" if mode == "model" else "Not ranked",
-             "detail": (f"{result.get('model') or 'The model'} scored the candidates: {top}." if mode == "model"
+             "detail": (f"Scored each stock on its evidence: {top}." if mode == "model"
                         else (note or "Ranking skipped."))},
             {"stage": "decision", "title": "Recommendation",
              "detail": (f"Buy {rec.get('symbol')} at confidence {rec.get('confidence', 0):.2f}. {rec.get('rationale', '')}"

@@ -22,6 +22,7 @@ from ai_trader.sia import SIAService
 from ai_trader.telegram import TelegramClient, parse_callback
 from ai_trader import google_oauth
 from ai_trader import robinhood_mcp as rh
+from ai_trader.picks import FilePicksStore, PicksService
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
@@ -59,18 +60,21 @@ def _build_stores():
     cipher = Cipher(settings.credentials_encryption_key)
     if settings.database_url:
         try:
-            from ai_trader.db import Database, PostgresCredentialStore, PostgresDecisionStore, PostgresUserStore
+            from ai_trader.db import (Database, PostgresCredentialStore, PostgresDecisionStore,
+                                      PostgresPicksStore, PostgresUserStore)
 
             database = Database(settings.database_url)
             return (PostgresUserStore(database), PostgresDecisionStore(database),
-                    PostgresCredentialStore(database, cipher), "postgres")
+                    PostgresCredentialStore(database, cipher), PostgresPicksStore(database), "postgres")
         except Exception as exc:  # a broken DSN must not take the whole app down
             print(f"Postgres unavailable, falling back to file stores: {exc}")
     return (UserStore(settings.account_dir), DecisionStore(settings.decision_dir),
-            FileCredentialStore(settings.account_dir, cipher), "files")
+            FileCredentialStore(settings.account_dir, cipher), FilePicksStore(settings.replay_log_dir), "files")
 
 
-users, decision_store, credential_store, STORAGE_BACKEND = _build_stores()
+users, decision_store, credential_store, picks_store, STORAGE_BACKEND = _build_stores()
+picks = PicksService(engine, picks_store, ttl_hours=settings.picks_ttl_hours,
+                     budget=min(settings.default_budget_usd, settings.max_budget_usd))
 decisions = DecisionService(decision_store, executor=_execute_decision)
 sessions = SessionSigner(settings.session_secret)
 
@@ -172,12 +176,39 @@ def login_page() -> FileResponse:
     return FileResponse(STATIC_DIR / "auth.html")
 
 
+def _needs_broker(user) -> bool:
+    """A real account must connect a broker before using the dashboard.
+
+    Demo sessions are exempt (they are shared and cannot hold keys), and so is
+    everyone when the server cannot store credentials, or nobody could get in.
+    """
+    if user.is_demo or not Cipher(settings.credentials_encryption_key).ready:
+        return False
+    try:
+        return not any(credential_store.summary(user.user_id, p) for p in ("alpaca", "robinhood"))
+    except CredentialError:
+        return False
+
+
 @app.get("/app")
 def dashboard(aitrader_session: str | None = Cookie(default=None)):
-    """The dashboard needs a session. Signing in is one click via Skip."""
-    if _current_user(aitrader_session) is None:
+    user = _current_user(aitrader_session)
+    if user is None:
         return RedirectResponse("/login", status_code=303)
+    if _needs_broker(user):
+        return RedirectResponse("/connect", status_code=303)
     return FileResponse(STATIC_DIR / "dashboard.html")
+
+
+@app.get("/connect")
+def connect_page(aitrader_session: str | None = Cookie(default=None)):
+    """Onboarding step after sign-up: connect a brokerage."""
+    user = _current_user(aitrader_session)
+    if user is None:
+        return RedirectResponse("/login", status_code=303)
+    if not _needs_broker(user):
+        return RedirectResponse("/app", status_code=303)
+    return FileResponse(STATIC_DIR / "connect.html")
 
 
 @app.get("/profile")
@@ -689,32 +720,39 @@ def _robinhood_redirect_uri(request: Request) -> str:
     return f"{base}/auth/robinhood/callback"
 
 
-def _profile_notice(message: str, ok: bool = False) -> RedirectResponse:
+RETURN_PATHS = {"/profile", "/connect"}
+
+
+def _profile_notice(message: str, ok: bool = False, path: str = "/profile") -> RedirectResponse:
     from urllib.parse import quote
 
-    return RedirectResponse(f"/profile?{'ok' if ok else 'error'}={quote(message)}", status_code=303)
+    path = path if path in RETURN_PATHS else "/profile"
+    return RedirectResponse(f"{path}?{'ok' if ok else 'error'}={quote(message)}", status_code=303)
 
 
 @app.get("/auth/robinhood")
-def robinhood_start(request: Request, aitrader_session: str | None = Cookie(default=None)):
+def robinhood_start(
+    request: Request, return_to: str = "/profile", aitrader_session: str | None = Cookie(default=None)
+):
     """Send the signed-in user to Robinhood to authorize their own Agentic account."""
+    back = return_to if return_to in RETURN_PATHS else "/profile"
     user = _current_user(aitrader_session)
     if user is None:
         return RedirectResponse("/login", status_code=303)
     if user.is_demo:
-        return _profile_notice("Demo sessions are shared, so they cannot connect a broker. Create an account first.")
+        return _profile_notice("Demo sessions are shared, so they cannot connect a broker. Create an account first.", path=back)
     if not Cipher(settings.credentials_encryption_key).ready:
-        return _profile_notice("Broker connections are not enabled on this server yet.")
+        return _profile_notice("Broker connections are not enabled on this server yet.", path=back)
     redirect_uri = _robinhood_redirect_uri(request)
     try:
         meta = rh.discover()
         client_id = rh.register_client(meta, redirect_uri)
     except rh.RobinhoodError as exc:
-        return _profile_notice(str(exc))
+        return _profile_notice(str(exc), path=back)
     state, verifier, challenge = google_oauth.new_flow()
     response = RedirectResponse(rh.authorize_url(meta, client_id, redirect_uri, state, challenge), status_code=303)
     response.set_cookie(
-        RH_COOKIE, sessions.issue(f"{user.user_id}|{state}|{verifier}|{client_id}", ttl=900),
+        RH_COOKIE, sessions.issue(f"{user.user_id}|{state}|{verifier}|{client_id}|{back}", ttl=900),
         max_age=900, httponly=True, samesite="lax", secure=settings.session_secure_cookie, path="/auth",
     )
     return response
@@ -732,29 +770,31 @@ def robinhood_callback(
     user = _current_user(aitrader_session)
     if user is None:
         return RedirectResponse("/login", status_code=303)
-    if error:
-        return _profile_notice("Robinhood connection was cancelled.")
     held = sessions.verify(aitrader_rh)
     parts = held.split("|") if held else []
-    if len(parts) != 4 or not code or not state:
-        return _profile_notice("Robinhood connection expired. Please try again.")
-    owner, expected_state, verifier, client_id = parts
+    back = parts[4] if len(parts) == 5 and parts[4] in RETURN_PATHS else "/profile"
+    if error:
+        return _profile_notice("Robinhood connection was cancelled.", path=back)
+    if len(parts) != 5 or not code or not state:
+        return _profile_notice("Robinhood connection expired. Please try again.", path=back)
+    owner, expected_state, verifier, client_id, _ = parts
     # The flow must finish in the same account that started it.
     if owner != user.user_id or not secrets.compare_digest(expected_state, state):
-        return _profile_notice("Robinhood connection could not be verified. Please try again.")
+        return _profile_notice("Robinhood connection could not be verified. Please try again.", path=back)
     try:
         tokens = rh.exchange_code(rh.discover(), client_id, _robinhood_redirect_uri(request), code, verifier)
     except rh.RobinhoodError as exc:
-        return _profile_notice(str(exc))
+        return _profile_notice(str(exc), path=back)
 
     extra = {"access_token": tokens["access_token"], "expires_at": tokens["expires_at"]}
     try:
         _save_robinhood(user.user_id, client_id, tokens.get("refresh_token"), extra)
         credential_store.delete(user.user_id, "alpaca")  # one active broker
     except CredentialError as exc:
-        return _profile_notice(str(exc))
+        return _profile_notice(str(exc), path=back)
 
-    response = _profile_notice("Robinhood connected.", ok=True)
+    response = (RedirectResponse("/app?welcome=robinhood", status_code=303) if back == "/connect"
+                else _profile_notice("Robinhood connected.", ok=True))
     response.delete_cookie(RH_COOKIE, path="/auth")
     return response
 
@@ -767,3 +807,84 @@ def disconnect_robinhood(aitrader_session: str | None = Cookie(default=None)) ->
     except CredentialError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return {"disconnected": removed}
+
+
+def _bought_from(run_id: str, user_id: str) -> list[str]:
+    """Symbols with an order that actually went through. A blocked or rejected
+    attempt placed nothing, so it must not stop the user from trying again."""
+    return sorted({d.symbol for d in decision_store.list(user_id=user_id, limit=100)
+                   if d.policy.get("run_id") == run_id and d.status == "approved"
+                   and (d.execution or {}).get("status") == "submitted"})
+
+
+def _picks_view(run: dict[str, Any], user) -> dict[str, Any]:
+    order_usd = min(settings.default_budget_usd, settings.max_budget_usd)
+    return {
+        "run_id": run["run_id"],
+        "updated_at": run["created_at"],
+        "status": run.get("status"),
+        "message": run.get("message"),
+        "articles_read": run.get("articles_read", 0),
+        "order_usd": f"{order_usd:.2f}",
+        "picks": run.get("picks", []),
+        "bought": _bought_from(run["run_id"], user.user_id),
+        "has_broker": not _needs_broker(user) and not user.is_demo,
+        "is_demo": user.is_demo,
+    }
+
+
+@app.get("/api/picks")
+def get_picks(aitrader_session: str | None = Cookie(default=None)) -> dict[str, Any]:
+    """Today's picks. Served from cache; researched on the spot only when stale."""
+    user = _require_user(aitrader_session)
+    return _picks_view(picks.latest_or_run(), user)
+
+
+@app.post("/api/picks/refresh")
+def refresh_picks(aitrader_session: str | None = Cookie(default=None)) -> dict[str, Any]:
+    user = _require_user(aitrader_session)
+    return _picks_view(picks.refresh(), user)
+
+
+class BuyPickPayload(BaseModel):
+    run_id: str
+    symbol: str
+
+
+@app.post("/api/picks/buy")
+def buy_pick(payload: BuyPickPayload, aitrader_session: str | None = Cookie(default=None)) -> dict[str, Any]:
+    """The user's tap on Buy. It is the approval, and it goes through the same gate as every order."""
+    user = _require_user(aitrader_session)
+    if user.is_demo:
+        raise HTTPException(status_code=403, detail="Create an account and connect a broker to buy.")
+    run = picks_store.latest()
+    if not run or run["run_id"] != payload.run_id:
+        raise HTTPException(status_code=409, detail="These picks have been updated. Refresh to see the latest.")
+    symbol = payload.symbol.upper().strip()
+    pick = next((p for p in run.get("picks", []) if p["symbol"] == symbol), None)
+    if not pick or pick.get("verdict") != "buy":
+        raise HTTPException(status_code=400, detail=f"{symbol} is not a buy in today's picks.")
+    if symbol in _bought_from(run["run_id"], user.user_id):
+        raise HTTPException(status_code=409, detail=f"You already bought {symbol} from today's picks.")
+
+    amount = min(settings.default_budget_usd, settings.max_budget_usd)
+    decision = decisions.propose(
+        user_id=user.user_id, enforce_open_limit=False,
+        symbol=symbol, side="buy", amount_usd=amount,
+        confidence=float(pick.get("score") or 0), reason=pick.get("summary") or "",
+        ttl_minutes=settings.decision_ttl_minutes,
+        policy={"max_budget_usd": str(settings.max_budget_usd), "long_only": True, "run_id": run["run_id"]},
+    )
+    decision = decisions.answer(decision.decision_id, approved=True,
+                                responder=f"picks:{user.user_id}", user_id=user.user_id)
+    return {"decision": decision.to_dict(), "execution": decision.execution or {}}
+
+
+@app.get("/api/cron/research")
+def cron_research(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    """Weekday-morning scheduled run so picks are ready before anyone logs in."""
+    if not settings.cron_secret or authorization != f"Bearer {settings.cron_secret}":
+        raise HTTPException(status_code=401, detail="Unauthorized.")
+    run = picks.run_now()
+    return {"run_id": run["run_id"], "status": run["status"], "picks": len(run["picks"]),
+            "took_seconds": run.get("took_seconds")}

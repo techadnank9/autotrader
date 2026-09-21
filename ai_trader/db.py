@@ -44,6 +44,11 @@ CREATE TABLE IF NOT EXISTS decisions (
 CREATE INDEX IF NOT EXISTS decisions_created_at_idx ON decisions (created_at DESC);
 ALTER TABLE decisions ADD COLUMN IF NOT EXISTS user_id TEXT;
 CREATE INDEX IF NOT EXISTS decisions_user_idx ON decisions (user_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS research_runs (
+    run_id     TEXT PRIMARY KEY,
+    created_at DOUBLE PRECISION NOT NULL,
+    payload    JSONB NOT NULL
+);
 CREATE TABLE IF NOT EXISTS broker_credentials (
     user_id       TEXT NOT NULL,
     provider      TEXT NOT NULL,
@@ -265,3 +270,23 @@ class PostgresCredentialStore:
             deleted = cur.rowcount > 0
             conn.commit()
         return deleted
+
+
+class PostgresPicksStore:
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    def latest(self) -> dict[str, Any] | None:
+        with self.db.connect() as conn, conn.cursor() as cur:
+            cur.execute("SELECT payload FROM research_runs ORDER BY created_at DESC LIMIT 1")
+            row = cur.fetchone()
+        return row["payload"] if row else None
+
+    def save(self, run: dict[str, Any]) -> None:
+        with self.db.connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO research_runs (run_id, created_at, payload) VALUES (%s, %s, %s) "
+                "ON CONFLICT (run_id) DO UPDATE SET payload = EXCLUDED.payload",
+                (run["run_id"], run["created_at"], json.dumps(run)),
+            )
+            conn.commit()

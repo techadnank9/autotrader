@@ -8,8 +8,8 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/static/app.css?v=202609211129">
-<link rel="stylesheet" href="/static/dashboard.css?v=202609211129">
+<link rel="stylesheet" href="/static/app.css?v=202609211418">
+<link rel="stylesheet" href="/static/dashboard.css?v=202609211418">
 </head>
 <body>
 <header class="topbar">
@@ -28,31 +28,25 @@
 </header>
 
 <main class="page">
+  <p class="welcome" id="welcome" role="status" hidden></p>
   <p class="demo-note" id="demo-note" hidden>You are in a demo session. Nothing here can place a real order.</p>
 
-  <section class="call" id="call-section" aria-labelledby="call-h">
+  <section class="call" aria-labelledby="picks-h">
     <div class="call-head">
-      <h1 id="call-h">Today's call</h1>
-      <button class="btn btn-ghost btn-sm" id="run" type="button">Run research</button>
+      <div>
+        <h1 id="picks-h">Today's picks</h1>
+        <p class="panel-sub" id="picks-sub">&nbsp;</p>
+      </div>
+      <button class="btn btn-quiet btn-sm" id="refresh" type="button" hidden>Refresh</button>
     </div>
-    <div id="call-body"><p class="skel">Loading…</p></div>
+    <div id="picks"><p class="skel">Loading today's picks…</p></div>
   </section>
 
-  <section class="grid">
-    <section class="panel" aria-labelledby="why-h">
-      <h2 id="why-h">Why this call</h2>
-      <p class="panel-sub">The reasoning your agents recorded, step by step.</p>
-      <div id="why"><p class="empty">No reasoning recorded yet. Run research to produce a call.</p></div>
-    </section>
-
-    <section class="panel" aria-labelledby="acct-h">
-      <h2 id="acct-h">Account</h2>
-      <p class="panel-sub">Read from your brokerage snapshot.</p>
-      <dl class="stats" id="stats"></dl>
-      <div class="holdings" id="holdings"></div>
-    </section>
+  <section class="panel" aria-labelledby="acct-h">
+    <h2 id="acct-h">Your account</h2>
+    <dl class="stats" id="stats"></dl>
+    <div class="holdings" id="holdings"></div>
   </section>
-
 
   <section class="panel" aria-labelledby="perf-h">
     <div class="panel-head">
@@ -71,35 +65,24 @@
     <details class="table-view"><summary>Show as table</summary><div id="chart-table"></div></details>
   </section>
 
-  <section class="panel" aria-labelledby="out-h">
-    <h2 id="out-h">Your calls</h2>
-    <p class="panel-sub">What was proposed, and what you did with it.</p>
-    <dl class="tiles" id="tiles"></dl>
-  </section>
 
   <section class="panel" aria-labelledby="trades-h">
     <h2 id="trades-h">Trades placed</h2>
-    <p class="panel-sub">Orders your approvals sent to the broker.</p>
+    <p class="panel-sub">Orders you placed from your picks.</p>
     <div id="trades"><p class="empty">Loading…</p></div>
   </section>
 
-  <section class="panel" aria-labelledby="hist-h">
-    <h2 id="hist-h">Decision history</h2>
-    <p class="panel-sub">Every call, what you answered, and what happened next.</p>
-    <div id="history"><p class="empty">No decisions yet.</p></div>
-  </section>
 
   <section class="panel" aria-labelledby="rails-h">
-    <h2 id="rails-h">Limits in force</h2>
-    <p class="panel-sub">Enforced in code on every order, not configurable from here.</p>
+    <h2 id="rails-h">Your limits</h2>
+    <p class="panel-sub">Every order is held to these.</p>
     <dl class="stats" id="rails"></dl>
-    <p class="delivery" id="delivery"></p>
   </section>
 
   <footer class="foot">
     <p>Prototype software, not a brokerage and not investment advice. Figures shown before a brokerage is connected are illustrative.</p>
   </footer>
 </main>
-<script src="/static/dashboard.js?v=202609211129"></script>
+<script src="/static/dashboard.js?v=202609211418"></script>
 </body>
 </html>

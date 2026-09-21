@@ -18,25 +18,38 @@ from ai_trader.config import Settings
 
 MODEL = "claude-opus-5"
 
-SYSTEM = """You are the ranking stage of a long-only US equity research system. A human \
-approves every order, so your job is to be right and to show your work, not to find a trade.
+SYSTEM = """You are the research analyst behind a long-only US stock app for everyday \
+investors. Each morning you read the latest news on a list of stocks and give a verdict on \
+each one. The user sees your verdicts as today's picks and buys with one tap, so be accurate \
+and be honest about uncertainty.
 
-You receive clustered news claims per ticker. Each claim lists how many independent \
-domains reported it. Weigh a claim by the independence and specificity of its sources, \
-not by how often it repeats. Retail chatter is weak evidence. Absence of news is not a signal.
+You receive news claims per ticker. Each claim lists how many independent outlets reported \
+it. Weigh a claim by the credibility and specificity of its source, not by how often it \
+repeats. Retail chatter is weak evidence. No news is not a signal either way.
 
-Rules:
-- Score each candidate 0.0 to 1.0 on the strength of evidence for a near-term long position.
-- Cite only claim ids you were given. A reason with no citation must score below 0.3.
-- Recommend "no_trade" unless one candidate is clearly supported. Recommending nothing \
-is a good outcome and the common one.
-- Never recommend options, shorting, leverage, crypto, or anything but the common stock."""
+For every stock:
+- verdict "buy": credible, specific, recent positive news supports buying it now (for \
+example an earnings or guidance beat, a reasoned analyst upgrade, a major contract or \
+product milestone) and the upside is not obviously already priced in. One credible, \
+specific source can be enough.
+- verdict "watch": the news is thin, mixed, stale, speculative, or promotional.
+- verdict "avoid": the news is negative, or risks clearly outweigh the upside.
+- score 0.0-1.0: strength of the case for buying now.
+- summary: one or two plain-English sentences for an everyday investor saying what \
+happened and why it matters. Never mention claims, ids, sources, models, or scores.
+- risks: short plain-English risks.
+- claim_ids: the claims your verdict rests on. Cite only ids you were given.
+
+Then set recommendation to the single strongest "buy", or "no_trade" if there is none.
+Never recommend options, shorting, leverage, crypto, or anything but the common stock."""
 
 
 class RankedCandidate(BaseModel):
     symbol: str
+    verdict: str  # "buy" | "watch" | "avoid"
     score: float = Field(ge=0.0, le=1.0)
-    reason: str
+    summary: str
+    risks: list[str]
     claim_ids: list[str]
 
 
@@ -62,11 +75,13 @@ _SCHEMA = {
                 "type": "object",
                 "properties": {
                     "symbol": {"type": "string"},
+                    "verdict": {"type": "string", "enum": ["buy", "watch", "avoid"]},
                     "score": {"type": "number"},
-                    "reason": {"type": "string"},
+                    "summary": {"type": "string"},
+                    "risks": {"type": "array", "items": {"type": "string"}},
                     "claim_ids": {"type": "array", "items": {"type": "string"}},
                 },
-                "required": ["symbol", "score", "reason", "claim_ids"],
+                "required": ["symbol", "verdict", "score", "summary", "risks", "claim_ids"],
                 "additionalProperties": False,
             },
         },
@@ -147,22 +162,26 @@ def harden(ranking: Ranking, valid_ids: set[str], model: str, usage: dict[str, A
     - Citations to claim ids that do not exist are stripped.
     - A reason with no valid citation is capped below 0.3.
     - Sorting happens after capping, so an uncited pick cannot keep a high rank.
-    - Recommending a symbol that was not ranked is downgraded to no_trade.
+    - A "buy" verdict with no valid citation is downgraded to "watch".
+    - The headline recommendation must be one of the cited buys, or no_trade.
     """
     pool = []
     for c in ranking.pool:
         cited = [cid for cid in c.claim_ids if cid in valid_ids]
         score = max(0.0, min(1.0, c.score))
         score = score if cited else min(score, 0.29)
-        pool.append({"symbol": c.symbol.upper(), "score": round(score, 4),
-                     "reason": c.reason, "claim_ids": cited})
-    pool.sort(key=lambda row: row["score"], reverse=True)
+        verdict = c.verdict if c.verdict in {"buy", "watch", "avoid"} else "watch"
+        if verdict == "buy" and not cited:
+            verdict = "watch"  # a buy must rest on real, cited news
+        pool.append({"symbol": c.symbol.upper(), "verdict": verdict, "score": round(score, 4),
+                     "reason": c.summary, "summary": c.summary, "risks": c.risks, "claim_ids": cited})
+    pool.sort(key=lambda row: ({"buy": 0, "watch": 1, "avoid": 2}[row["verdict"]], -row["score"]))
 
     rec = ranking.recommendation
     decision = rec.decision if rec.decision in {"buy", "no_trade"} else "no_trade"
     symbol = rec.symbol.upper() if (rec.symbol and decision == "buy") else None
-    if symbol and symbol not in {p["symbol"] for p in pool}:
-        decision, symbol = "no_trade", None
+    if symbol and symbol not in {p["symbol"] for p in pool if p["verdict"] == "buy"}:
+        decision, symbol = "no_trade", None  # the headline pick must itself be a cited buy
 
     return {
         "pool": pool,

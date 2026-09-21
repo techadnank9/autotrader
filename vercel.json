@@ -6,10 +6,25 @@
       "framework": "fastapi",
       "runtime": "python",
       "entrypoint": "main:app",
-      "functions": { "main.py": { "maxDuration": 300 } }
+      "functions": {
+        "main.py": {
+          "maxDuration": 300
+        }
+      }
     }
   },
   "rewrites": [
-    { "source": "/(.*)", "destination": { "service": "aitrader" } }
+    {
+      "source": "/(.*)",
+      "destination": {
+        "service": "aitrader"
+      }
+    }
+  ],
+  "crons": [
+    {
+      "path": "/api/cron/research",
+      "schedule": "0 13 * * 1-5"
+    }
   ]
 }

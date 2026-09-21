@@ -69,6 +69,8 @@ class Settings:
     openai_api_key: str | None = None
     openai_model: str = "gpt-5.6-sol"
     research_time_range: str = "day"
+    picks_ttl_hours: float = 6.0
+    cron_secret: str | None = None
     credentials_encryption_key: str | None = None
     allow_live_trading: bool = False
     google_client_id: str | None = None
@@ -161,6 +163,8 @@ class Settings:
             openai_api_key=os.environ.get("OPENAI_API_KEY", "").strip() or None,
             openai_model=os.environ.get("OPENAI_MODEL", "gpt-5.6-sol").strip() or "gpt-5.6-sol",
             research_time_range=os.environ.get("RESEARCH_TIME_RANGE", "day").strip() or "day",
+            picks_ttl_hours=float(os.environ.get("PICKS_TTL_HOURS", "6") or 6),
+            cron_secret=os.environ.get("CRON_SECRET", "").strip() or None,
             credentials_encryption_key=os.environ.get("CREDENTIALS_ENCRYPTION_KEY", "").strip() or None,
             # Platform kill switch: users can connect paper accounts only, until the
             # operator deliberately allows live trading for everyone.

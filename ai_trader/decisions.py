@@ -176,8 +176,8 @@ class DecisionService:
         self.executor = executor
         self.max_open = max_open
 
-    def propose(self, *, user_id: str | None = None, **kwargs: Any) -> Decision:
-        open_now = self.store.open_decisions(user_id=user_id)
+    def propose(self, *, user_id: str | None = None, enforce_open_limit: bool = True, **kwargs: Any) -> Decision:
+        open_now = self.store.open_decisions(user_id=user_id) if enforce_open_limit else []
         if len(open_now) >= self.max_open:
             raise DecisionClosed(
                 f"{len(open_now)} decision(s) already awaiting an answer; "

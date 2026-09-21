@@ -22,130 +22,113 @@
     return data;
   }
 
-  /* ---------- today's call ---------- */
+  /* ---------- today's picks ---------- */
 
-  function renderCall(decision) {
-    state.decision = decision;
-    var body = $("call-body");
-    if (!decision) {
-      body.innerHTML =
-        '<p class="empty">No call is waiting. Your agents propose at most one at a time — ' +
-        'run research to produce today\'s.</p>';
+  var view = null;
+  var LABEL = { buy: "Buy", watch: "Watch", avoid: "Avoid" };
+
+  function timeOf(epoch) {
+    return new Date(epoch * 1000).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+  }
+
+  function pickRow(p, v) {
+    var bought = v.bought.indexOf(p.symbol) !== -1;
+    var action = "";
+    if (p.verdict === "buy") {
+      if (bought) action = '<span class="tag ok">Bought</span>';
+      else if (v.is_demo) action = '<a class="btn btn-ghost btn-sm" href="/login">Create an account to buy</a>';
+      else if (!v.has_broker) action = '<a class="btn btn-ghost btn-sm" href="/connect">Connect a broker to buy</a>';
+      else action = '<button class="btn btn-primary btn-sm" data-buy="' + esc(p.symbol) + '" type="button">Buy ' + money(v.order_usd) + '</button>';
+    }
+    var sources = (p.sources || []).map(function (s) {
+      return '<li><a href="' + esc(s.url) + '" target="_blank" rel="noopener">' + esc(s.title || s.url) + '</a>' +
+        (s.outlet ? ' <span>' + esc(s.outlet) + '</span>' : '') + '</li>';
+    }).join("");
+    var risks = (p.risks || []).map(function (r) { return '<li>' + esc(r) + '</li>'; }).join("");
+    var more = (sources || risks)
+      ? '<details class="pick-more"><summary>Why</summary>' +
+          (sources ? '<p class="pick-h">In the news</p><ul class="pick-src">' + sources + '</ul>' : '') +
+          (risks ? '<p class="pick-h">Risks</p><ul class="pick-risk">' + risks + '</ul>' : '') +
+        '</details>'
+      : '';
+    return '<article class="pick v-' + esc(p.verdict) + '">' +
+      '<div class="pick-id"><span class="pick-sym mono">' + esc(p.symbol) + '</span>' +
+        '<span class="verdict v-' + esc(p.verdict) + '">' + (LABEL[p.verdict] || "Watch") + '</span></div>' +
+      '<div class="pick-body"><p class="pick-sum">' + esc(p.summary) + '</p>' + more +
+        '<p class="pick-msg" data-msg="' + esc(p.symbol) + '" role="status"></p></div>' +
+      '<div class="pick-act" data-act="' + esc(p.symbol) + '">' + action + '</div>' +
+    '</article>';
+  }
+
+  function renderPicks(v) {
+    view = v;
+    $("picks-sub").textContent = "Updated " + timeOf(v.updated_at) +
+      (v.articles_read ? " · from " + v.articles_read + " news articles" : "");
+    $("refresh").hidden = false;
+
+    if (v.status !== "ok" || !v.picks.length) {
+      $("picks").innerHTML = '<p class="empty">' + esc(v.message || "Today's picks aren't ready yet. Check back shortly.") + '</p>';
       return;
     }
+    var buys = v.picks.filter(function (p) { return p.verdict === "buy"; });
+    var lead = buys.length
+      ? '<p class="picks-lead">' + buys.length + (buys.length === 1 ? " stock looks" : " stocks look") + " worth buying today.</p>"
+      : '<p class="picks-lead">No strong buys today. Nothing in today’s news clears the bar, so here is what we’re watching.</p>';
+    $("picks").innerHTML = lead + '<div class="pick-list">' + v.picks.map(function (p) { return pickRow(p, v); }).join("") + '</div>';
 
-    var pct = Math.max(0, Math.min(1, Number(decision.confidence) || 0));
-    var answered = decision.status !== "pending";
-    var html =
-      '<div class="pending">' +
-        '<div class="pending-main">' +
-          '<p class="sym-row"><span class="sym mono">' + esc(decision.symbol) + '</span>' +
-          '<span class="side">' + esc(decision.side) + '</span></p>' +
-          '<p class="amount">Order <b class="mono">' + money(decision.amount_usd) + '</b></p>' +
-          '<p class="reason">' + esc(decision.reason) + '</p>' +
-          '<p class="expiry">Expires ' + esc(clockOf(decision.expires_at)) + '. No answer means no trade.</p>' +
-        '</div>' +
-        '<div class="conf">' +
-          '<p class="conf-head"><span>CONFIDENCE</span><span class="mono">' + pct.toFixed(2) + '</span></p>' +
-          '<span class="conf-track"><i class="conf-fill" style="width:' + (pct * 100).toFixed(0) + '%"></i></span>' +
-        '</div>' +
-      '</div>';
-
-    if (answered) {
-      var exec = decision.execution || {};
-      var neg = decision.status !== "approved";
-      html += '<p class="state' + (neg ? " neg" : "") + '"><i></i>' + esc(decision.status) +
-        (exec.status ? " · execution " + esc(exec.status) : "") + '</p>';
-      if (exec.message) html += '<p class="expiry">' + esc(exec.message) + '</p>';
-    } else {
-      html +=
-        '<div class="answer">' +
-          '<button class="btn btn-ghost" id="skip-btn" type="button">Skip</button>' +
-          '<button class="btn btn-primary" id="approve-btn" type="button">Approve this order</button>' +
-        '</div>';
-    }
-    body.innerHTML = html;
-
-    if (!answered) {
-      $("approve-btn").onclick = function () { answer(decision.decision_id, true); };
-      $("skip-btn").onclick = function () { answer(decision.decision_id, false); };
-    }
+    Array.prototype.forEach.call(document.querySelectorAll("[data-buy]"), function (btn) {
+      btn.onclick = function () { confirmBuy(btn.dataset.buy); };
+    });
   }
 
-  async function answer(decisionId, approved) {
-    if (state.busy) return;
-    state.busy = true;
-    var btn = approved ? $("approve-btn") : $("skip-btn");
-    if (btn) { btn.disabled = true; btn.textContent = approved ? "Placing…" : "Skipping…"; }
-    try {
-      var data = await api("/api/decisions/answer", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ decision_id: decisionId, approved: approved })
-      });
-      renderCall(data.decision);
-      loadHistory();
-    } catch (err) {
-      $("call-body").insertAdjacentHTML("beforeend",
-        '<p class="expiry" style="color:var(--down)">' + esc(err.message) + '</p>');
-      if (btn) { btn.disabled = false; btn.textContent = approved ? "Approve this order" : "Skip"; }
-    } finally {
-      state.busy = false;
-    }
+  function confirmBuy(symbol) {
+    var slot = document.querySelector('[data-act="' + symbol + '"]');
+    slot.innerHTML =
+      '<span class="confirm">Buy ' + money(view.order_usd) + ' of ' + esc(symbol) + '?</span>' +
+      '<button class="btn btn-primary btn-sm" data-yes type="button">Confirm</button>' +
+      '<button class="btn btn-quiet btn-sm" data-no type="button">Cancel</button>';
+    slot.querySelector("[data-no]").onclick = function () { renderPicks(view); };
+    slot.querySelector("[data-yes]").onclick = function () { buy(symbol, slot); };
   }
 
-  async function runResearch() {
-    var btn = $("run");
-    btn.disabled = true; btn.textContent = "Researching…";
-    $("call-body").innerHTML = '<p class="skel">Agents are reading the market. This can take a moment…</p>';
+  async function buy(symbol, slot) {
+    slot.innerHTML = '<span class="confirm">Placing order…</span>';
+    var msg = document.querySelector('[data-msg="' + symbol + '"]');
     try {
-      var data = await api("/api/decisions/propose", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ pool_size: 5 })
-      });
-      if (data.status === "no_trade") {
-        $("call-body").innerHTML = '<p class="empty">No candidate cleared the bar today. ' +
-          esc(data.reason || "") + '</p>';
-        renderTrace((data.analysis || {}).reasoning_trace);
+      var r = await api("/api/picks/buy", { method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ run_id: view.run_id, symbol: symbol }) });
+      var ex = r.execution || {};
+      if (ex.status === "submitted") {
+        view.bought.push(symbol);
+        renderPicks(view);
+        var m2 = document.querySelector('[data-msg="' + symbol + '"]');
+        m2.className = "pick-msg ok"; m2.textContent = "Order placed. It will show in your account shortly.";
+        loadTrades(); loadAccount();
       } else {
-        renderCall(data.decision);
-        if (data.delivery && data.delivery.sent) {
-          $("call-body").insertAdjacentHTML("beforeend",
-            '<p class="expiry">Also sent to your Telegram.</p>');
-        }
-        loadTrace();
+        renderPicks(view);
+        var m3 = document.querySelector('[data-msg="' + symbol + '"]');
+        m3.className = "pick-msg bad"; m3.textContent = ex.message || "The order was not placed.";
       }
-      loadHistory();
     } catch (err) {
-      $("call-body").innerHTML = '<p class="empty" style="color:var(--down)">' + esc(err.message) + '</p>';
-    } finally {
-      btn.disabled = false; btn.textContent = "Run research";
+      renderPicks(view);
+      var m4 = document.querySelector('[data-msg="' + symbol + '"]');
+      m4.className = "pick-msg bad"; m4.textContent = err.message;
     }
   }
 
-  /* ---------- reasoning ---------- */
-
-  function renderTrace(trace) {
-    if (!Array.isArray(trace) || !trace.length) return;
-    $("why").innerHTML = '<div class="trace">' + trace.map(function (t) {
-      return '<article class="trace-row">' +
-        '<p class="trace-stage">' + esc(t.stage || "step") + '</p>' +
-        '<p class="trace-title">' + esc(t.title || "") + '</p>' +
-        '<p class="trace-detail">' + esc(t.detail || "") + '</p>' +
-      '</article>';
-    }).join("") + '</div>';
-  }
-
-  async function loadTrace() {
+  async function loadPicks(force) {
+    $("refresh").disabled = true;
+    if (!view || force) {
+      $("picks").innerHTML = '<div class="picks-wait"><i class="pulse"></i><div><p>Reading today’s market news…</p>' +
+        '<p class="panel-sub">This takes about a minute when the picks need updating.</p></div></div>';
+    }
     try {
-      var data = await api("/api/analyze", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ budget: "5", pool_size: 5 })
-      });
-      renderTrace(data.reasoning_trace);
-    } catch (err) { /* the call itself still stands without its trace */ }
+      renderPicks(await api(force ? "/api/picks/refresh" : "/api/picks", force ? { method: "POST" } : undefined));
+    } catch (err) {
+      $("picks").innerHTML = '<p class="empty">Could not load today’s picks. ' + esc(err.message) + '</p>';
+    } finally {
+      $("refresh").disabled = false;
+    }
   }
 
   /* ---------- account ---------- */
@@ -180,35 +163,6 @@
     return '<div><dt>' + esc(label) + '</dt><dd' + (isText ? ' class="txt"' : '') + '>' + esc(value) + '</dd></div>';
   }
 
-  /* ---------- history ---------- */
-
-  async function loadHistory() {
-    try {
-      var data = await api("/api/decisions");
-      var open = data.open || [];
-      var recent = data.recent || [];
-      if (open.length && !state.decision) renderCall(open[0]);
-      else if (!open.length && !state.decision) renderCall(null);
-
-      renderTiles(recent);
-      var answered = recent.filter(function (d) { return d.status !== "pending"; });
-      $("history").innerHTML = answered.length
-        ? '<div class="hist">' + answered.map(function (d) {
-            var exec = d.execution || {};
-            var cls = d.status === "approved" ? "ok" : (d.status === "skipped" ? "" : "no");
-            return '<div class="hist-row">' +
-              '<span class="hist-when">' + esc(dayOf(d.created_at)) + '</span>' +
-              '<span class="hist-what"><b>' + esc(d.symbol) + '</b> <span>' + esc(d.side) + ' ' + money(d.amount_usd) + '</span></span>' +
-              '<span class="tag ' + cls + '">' + esc(d.status) + '</span>' +
-              '<span class="hist-out">' + esc(exec.status || "—") + '</span>' +
-            '</div>';
-          }).join("") + '</div>'
-        : '<p class="empty">Nothing answered yet. Decisions you approve or skip are recorded here with what happened after.</p>';
-    } catch (err) {
-      $("history").innerHTML = '<p class="empty">Could not load decision history.</p>';
-    }
-  }
-
   /* ---------- limits + delivery ---------- */
 
   async function loadLimits() {
@@ -222,26 +176,7 @@
         stat("Instruments", "Long-only US equities", true);
     } catch (err) { $("rails").innerHTML = ""; }
 
-    try {
-      var c2 = (await api("/api/config")).capabilities || {};
-      var parts = [
-        "Research: " + (c2.research_providers && c2.research_providers.length ? c2.research_providers.join(" + ") : "not connected"),
-        "Ranking: " + (c2.ranking_model || "not connected"),
-      ];
-      try {
-        var bs = await api("/api/broker/status");
-        parts.push("Broker: " + (bs.connected ? "Alpaca (" + bs.mode + ")" : "not connected"));
-      } catch (e) { parts.push("Broker: unknown"); }
-      $("delivery").insertAdjacentHTML("beforebegin", '<p class="delivery">' + esc(parts.join(" · ")) + '</p>');
-    } catch (e) {}
-    try {
-      var tg = await api("/api/telegram/status");
-      $("delivery").textContent = tg.configured
-        ? "Decision cards are delivered to Telegram" + (tg.bot ? " via @" + tg.bot : "") + "."
-        : "Telegram delivery is not configured, so calls appear here only.";
-    } catch (err) {
-      $("delivery").textContent = "Telegram delivery status unavailable.";
-    }
+
   }
 
 
@@ -383,14 +318,6 @@
 
   /* ---------- calls + trades ---------- */
 
-  function renderTiles(decisions) {
-    var count = function (st) { return decisions.filter(function (d) { return d.status === st; }).length; };
-    $("tiles").innerHTML =
-      tile("Calls proposed", decisions.length) + tile("Approved", count("approved")) +
-      tile("Skipped", count("skipped")) + tile("Expired", count("expired"));
-  }
-  function tile(label, n) { return '<div><dt>' + esc(label) + '</dt><dd>' + n + '</dd></div>'; }
-
   async function loadTrades() {
     try {
       var data = await api("/api/orders");
@@ -425,14 +352,23 @@
       if (me.user.is_demo) $("demo-note").hidden = false;
     } catch (err) { window.location.href = "/login"; return; }
 
+    var welcome = new URLSearchParams(location.search).get("welcome");
+    if (welcome) {
+      var name = welcome === "robinhood" ? "Robinhood" : "Alpaca paper";
+      $("welcome").innerHTML = "You're set up. Your <b>" + name + "</b> account is connected. " +
+        "Tap <b>Buy</b> on any pick below to place an order.";
+      $("welcome").hidden = false;
+      history.replaceState(null, "", "/app");
+    }
+
     $("signout").onclick = async function () {
       try { await api("/api/auth/logout", { method: "POST" }); } catch (e) {}
       window.location.href = "/login";
     };
-    $("run").onclick = runResearch;
+    $("refresh").onclick = function () { loadPicks(true); };
 
     bindPeriods();
-    loadHistory();
+    loadPicks(false);
     loadAccount();
     loadLimits();
     loadEquity();
