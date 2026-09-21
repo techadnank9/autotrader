@@ -6,7 +6,7 @@
   function signed(v) { return (v > 0 ? "+" : v < 0 ? "−" : "") + money(Math.abs(v)).slice(0); }
   function pct(v) { return v == null ? "" : " (" + (v > 0 ? "+" : v < 0 ? "−" : "") + Math.abs(v).toFixed(2) + "%)"; }
   function tone(v) { return v > 0 ? "up" : v < 0 ? "down" : ""; }
-  var period = "1M";
+  var period = "1M", isDemo = false;
 
   function renderSummary(p) {
     var t = function (k, v, cls) { return '<div><dt>' + esc(k) + '</dt><dd class="' + (cls || "") + '">' + v + '</dd></div>'; };
@@ -78,7 +78,13 @@
   async function load() {
     try {
       var p = await api("/api/portfolio");
-      if (!p.connected) { location.href = "/connect"; return; }
+      if (!p.connected) {
+        if (!isDemo) { location.href = "/connect"; return; }
+        document.querySelectorAll("main .panel").forEach(function (el) { el.hidden = true; });
+        $("summary").innerHTML = '<p class="empty">This is where your money shows up: value, cash, what you hold, and how it is doing. ' +
+          'A demo has no brokerage, so there is nothing here yet. <a href="/login">Create an account</a> and connect a broker to see yours.</p>';
+        return;
+      }
       if (p.error) { $("summary").innerHTML = '<p class="empty">' + esc(p.error) + '</p>'; return; }
       renderSummary(p); renderPositions(p); renderOrders(p);
       document.querySelectorAll("[data-open]").forEach(function (b) { b.onclick = function () { window.StockPanel.open(b.dataset.open, { onBought: load }); }; });
@@ -88,10 +94,12 @@
   async function boot() {
     var user = await window.Shell.mount({ active: "portfolio", stockOpts: function () { return { onBought: load }; } });
     if (!user) return;
+    isDemo = !!user.is_demo;
     document.querySelectorAll("#periods button").forEach(function (b) {
       b.onclick = function () { period = b.dataset.p; document.querySelectorAll("#periods button").forEach(function (o) { o.setAttribute("aria-pressed", String(o === b)); }); loadChart(); };
     });
-    load(); loadChart(); loadHistory();
+    load();
+    if (!isDemo) { loadChart(); loadHistory(); }
     setInterval(function () { if (!document.hidden) load(); }, 30000);  // keep values live while open
   }
   boot();
