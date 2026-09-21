@@ -155,7 +155,13 @@ class AlpacaBroker:
             for t, e, pl in zip(h.get("timestamp") or [], h.get("equity") or [], h.get("profit_loss") or [])
             if e is not None
         ]
-        return {"period": period, "timeframe": timeframe, "base_value": h.get("base_value"), "points": points}
+        # Alpaca reports $0 for every day before the account was funded. Those days
+        # are not a balance of zero, they are days the account did not exist; kept,
+        # they draw the opening deposit as a gain. Start at the first funded day.
+        first_funded = next((i for i, p in enumerate(points) if p["equity"] > 0), len(points))
+        points = points[first_funded:]
+        return {"period": period, "timeframe": timeframe, "base_value": h.get("base_value"),
+                "points": points, "opened_in_period": first_funded > 0}
 
     def recent_orders(self, limit: int = 50) -> list[dict[str, Any]]:
         orders = self._get("/v2/orders", {"status": "all", "limit": limit, "direction": "desc"})

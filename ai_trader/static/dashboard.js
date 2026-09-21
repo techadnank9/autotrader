@@ -197,25 +197,30 @@
   function renderEquity(data) {
     var wrap = $("chart");
     var pts = (data.points || []).filter(function (p) { return p.equity != null; });
+    // Days before the account was funded are not a $0 balance; never chart them.
+    while (pts.length && !(pts[0].equity > 0)) pts.shift();
     if (pts.length < 2) {
-      wrap.innerHTML = '<p class="empty">Not enough history yet. The curve fills in as your account trades.</p>';
+      wrap.innerHTML = (pts.length ? '<div class="headline"><span class="big">' + money(pts[0].equity) + '</span></div>' : '') +
+        '<p class="empty">Your account is new, so there is no history to chart yet. It fills in day by day from here.</p>';
       $("chart-table").innerHTML = "";
       return;
     }
 
     var first = pts[0].equity, last = pts[pts.length - 1].equity;
-    var chg = last - first, pct = first ? chg / first : 0;
+    var chg = last - first, pct = chg / first;
     var sign = chg >= 0 ? "+" : "−";
+    var since = data.opened_in_period ? " since you opened the account" : " this period";
 
     wrap.innerHTML =
       '<div class="headline"><span class="big">' + money(last) + '</span>' +
-      '<span class="chg">' + sign + money(Math.abs(chg)).slice(1) + " (" + sign + Math.abs(pct * 100).toFixed(2) + '%) this period</span></div>';
+      '<span class="chg">' + sign + money(Math.abs(chg)).slice(1) + " (" + sign + Math.abs(pct * 100).toFixed(2) + '%)' + since + '</span></div>';
 
     var W = Math.max(wrap.clientWidth, 320), H = 260;
     var ys = pts.map(function (p) { return p.equity; });
     var lo = Math.min.apply(null, ys), hi = Math.max.apply(null, ys);
     var pad = (hi - lo) * 0.12 || Math.max(hi * 0.01, 1);
     lo -= pad; hi += pad;
+    if (Math.min.apply(null, ys) >= 0) lo = Math.max(lo, 0);  // an account value axis never goes negative
 
     // Size the left gutter from the widest tick label, so large balances never clip.
     var widest = Math.max(money(lo).length, money(hi).length);
