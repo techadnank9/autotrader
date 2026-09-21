@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Portfolio — AI Trader</title>
+<meta name="theme-color" content="#08090B">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/app.css?v=20260921150450">
+<link rel="stylesheet" href="/static/dashboard.css?v=20260921150450">
+</head>
+<body>
+<main class="page">
+  <section class="call" aria-labelledby="pf-h">
+    <h1 id="pf-h">Portfolio</h1>
+    <div id="summary"><p class="skel">Loading your account…</p></div>
+  </section>
+
+  <section class="panel" aria-labelledby="pos-h">
+    <h2 id="pos-h">Open positions</h2>
+    <p class="panel-sub">Stocks you hold right now.</p>
+    <div id="positions"><p class="empty">Loading…</p></div>
+  </section>
+
+  <section class="panel" aria-labelledby="ord-h">
+    <h2 id="ord-h">Open orders</h2>
+    <p class="panel-sub">Waiting to fill, or exit plans watching a position.</p>
+    <div id="orders"><p class="empty">Loading…</p></div>
+  </section>
+
+  <section class="panel" aria-labelledby="perf-h">
+    <div class="panel-head">
+      <div><h2 id="perf-h">Account value</h2><p class="panel-sub" id="perf-sub">&nbsp;</p></div>
+      <div class="seg" role="group" aria-label="Time range" id="periods">
+        <button type="button" data-p="1W">1W</button><button type="button" data-p="1M" aria-pressed="true">1M</button>
+        <button type="button" data-p="3M">3M</button><button type="button" data-p="1A">1Y</button>
+      </div>
+    </div>
+    <div class="chart-wrap" id="chart"><p class="empty">Loading…</p></div>
+  </section>
+
+  <section class="panel" aria-labelledby="hist-h">
+    <h2 id="hist-h">Recent orders</h2>
+    <div id="history"><p class="empty">Loading…</p></div>
+  </section>
+</main>
+<script src="/static/charts.js?v=20260921150450"></script>
+<script src="/static/stock.js?v=20260921150450"></script>
+<script src="/static/shell.js?v=20260921150450"></script>
+<script src="/static/portfolio.js?v=20260921150450"></script>
+</body>
+</html>

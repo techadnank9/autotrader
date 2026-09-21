@@ -3,33 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Dashboard — AI Trader</title>
+<title>Today's picks — AI Trader</title>
 <meta name="theme-color" content="#08090B">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/static/app.css?v=202609211448">
-<link rel="stylesheet" href="/static/dashboard.css?v=202609211448">
+<link rel="stylesheet" href="/static/app.css?v=20260921150450">
+<link rel="stylesheet" href="/static/dashboard.css?v=20260921150450">
 </head>
 <body>
-<header class="topbar">
-  <div class="bar">
-    <a class="brand" href="/">
-      <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="1.5" y="1.5" width="21" height="21" rx="6.5" stroke="#C8F24C" stroke-width="1.5"/><path d="M6.5 15.5L10 11l3 3 4.5-6" stroke="#C8F24C" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
-      AI Trader
-    </a>
-    <nav class="tabs-nav" aria-label="Sections">
-      <a href="/app" aria-current="page">Dashboard</a>
-      <a href="/profile">Profile</a>
-    </nav>
-    <span class="who" id="who"></span>
-    <button class="btn btn-quiet btn-sm" id="signout" type="button">Sign out</button>
-  </div>
-</header>
-
 <main class="page">
   <p class="welcome" id="welcome" role="status" hidden></p>
-  <p class="demo-note" id="demo-note" hidden>You are in a demo session. Nothing here can place a real order.</p>
+  <p class="demo-note" id="demo-note" hidden>You're exploring a demo. Create an account and connect a broker to buy.</p>
 
   <section class="call" aria-labelledby="picks-h">
     <div class="call-head">
@@ -43,46 +28,16 @@
   </section>
 
   <section class="panel" aria-labelledby="acct-h">
-    <h2 id="acct-h">Your account</h2>
-    <dl class="stats" id="stats"></dl>
-    <div class="holdings" id="holdings"></div>
-  </section>
-
-  <section class="panel" aria-labelledby="perf-h">
     <div class="panel-head">
-      <div>
-        <h2 id="perf-h">Account value</h2>
-        <p class="panel-sub" id="perf-sub">From your broker's portfolio history.</p>
-      </div>
-      <div class="seg" role="group" aria-label="Time range" id="periods">
-        <button type="button" data-p="1W">1W</button>
-        <button type="button" data-p="1M" aria-pressed="true">1M</button>
-        <button type="button" data-p="3M">3M</button>
-        <button type="button" data-p="1A">1Y</button>
-      </div>
+      <h2 id="acct-h">Your account</h2>
+      <a class="btn btn-quiet btn-sm" href="/portfolio">View portfolio</a>
     </div>
-    <div class="chart-wrap" id="chart"><p class="empty">Loading…</p></div>
-    <details class="table-view"><summary>Show as table</summary><div id="chart-table"></div></details>
+    <div id="acct"><p class="empty">Loading…</p></div>
   </section>
-
-
-  <section class="panel" aria-labelledby="trades-h">
-    <h2 id="trades-h">Trades placed</h2>
-    <p class="panel-sub">Orders you placed from your picks.</p>
-    <div id="trades"><p class="empty">Loading…</p></div>
-  </section>
-
-
-  <section class="panel" aria-labelledby="rails-h">
-    <h2 id="rails-h">Your limits</h2>
-    <p class="panel-sub">Every order is held to these.</p>
-    <dl class="stats" id="rails"></dl>
-  </section>
-
-  <footer class="foot">
-    <p>Prototype software, not a brokerage and not investment advice. Figures shown before a brokerage is connected are illustrative.</p>
-  </footer>
 </main>
-<script src="/static/dashboard.js?v=202609211448"></script>
+<script src="/static/charts.js?v=20260921150450"></script>
+<script src="/static/stock.js?v=20260921150450"></script>
+<script src="/static/shell.js?v=20260921150450"></script>
+<script src="/static/dashboard.js?v=20260921150450"></script>
 </body>
 </html>

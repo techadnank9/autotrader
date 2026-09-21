@@ -8,24 +8,10 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/static/app.css?v=202609211448">
-<link rel="stylesheet" href="/static/dashboard.css?v=202609211448">
+<link rel="stylesheet" href="/static/app.css?v=20260921150450">
+<link rel="stylesheet" href="/static/dashboard.css?v=20260921150450">
 </head>
 <body>
-<header class="topbar">
-  <div class="bar">
-    <a class="brand" href="/">
-      <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="1.5" y="1.5" width="21" height="21" rx="6.5" stroke="#C8F24C" stroke-width="1.5"/><path d="M6.5 15.5L10 11l3 3 4.5-6" stroke="#C8F24C" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
-      AI Trader
-    </a>
-    <nav class="tabs-nav" aria-label="Sections">
-      <a href="/app">Dashboard</a>
-      <a href="/profile" aria-current="page">Profile</a>
-    </nav>
-    <span class="who" id="who"></span>
-    <button class="btn btn-quiet btn-sm" id="signout" type="button">Sign out</button>
-  </div>
-</header>
 
 <main class="page">
   <section class="call">
@@ -50,7 +36,10 @@
   <footer class="foot"><p>Prototype software, not a brokerage and not investment advice.</p></footer>
 </main>
 
-<script src="/static/broker.js?v=202609211448"></script>
+<script src="/static/charts.js?v=20260921150450"></script>
+<script src="/static/stock.js?v=20260921150450"></script>
+<script src="/static/shell.js?v=20260921150450"></script>
+<script src="/static/broker.js?v=20260921150450"></script>
 <script>
 (function(){
   var $=function(id){return document.getElementById(id)};
@@ -66,16 +55,11 @@
 
 
   async function boot(){
-    var me;
-    try{ me=await api("/api/auth/me"); }catch(e){ location.href="/login"; return; }
-    if(!me.authenticated){ location.href="/login"; return; }
-    var u=me.user;
-    $("who").textContent=u.email;
+    var u = await window.Shell.mount({ active: "profile" });
+    if (!u) return;
     $("me").innerHTML = stat("Email", u.email, true) +
       stat("Account type", u.is_demo ? "Demo session" : "Member", true) +
-      stat("Member since", u.created_at ? new Date(u.created_at*1000).toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"}) : "—", true) +
-      stat("User id", u.user_id, true);
-    $("signout").onclick=async function(){ try{await api("/api/auth/logout",{method:"POST"})}catch(e){} location.href="/login"; };
+      stat("Member since", u.created_at ? new Date(u.created_at*1000).toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"}) : "—", true);
 
     window.BrokerConnect.mount({
       root: $("bk"), note: $("bk-note"), returnTo: "/profile",

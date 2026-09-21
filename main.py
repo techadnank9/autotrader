@@ -15,8 +15,6 @@ os.environ.setdefault("PORTFOLIO_AGENT_DIR", "/tmp/ai_trader/portfolio_agents")
 os.environ.setdefault("ACCOUNT_DIR", "/tmp/ai_trader/accounts")
 os.environ.setdefault("DECISION_DIR", "/tmp/ai_trader/decisions")
 os.environ.setdefault("SESSION_SECURE_COOKIE", "true")
-os.environ.setdefault("MAX_BUDGET_USD", "5")
-os.environ.setdefault("DEFAULT_BUDGET_USD", "5")
 
 from ai_trader.server import app  # noqa: E402
 

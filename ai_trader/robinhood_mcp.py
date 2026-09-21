@@ -459,6 +459,21 @@ class RobinhoodBroker:
             "submitted_at": _find(r, ("created_at", "submitted_at")),
         } for r in rows]
 
+    def place_buy(self, symbol: str, *, client_order_id: str, notional: Decimal | None = None,
+                  qty: Decimal | None = None, take_profit: Decimal | None = None,
+                  stop_loss: Decimal | None = None, est_price: Decimal | None = None) -> dict[str, Any]:
+        if qty is not None or take_profit is not None or stop_loss is not None:
+            return {"status": "blocked", "broker": self.name,
+                    "message": "With Robinhood, buy by dollar amount without an exit plan for now."}
+        return self.place_notional_buy(symbol, notional or Decimal("0"), client_order_id)
+
+    def get_order(self, order_id: str) -> dict[str, Any]:
+        return next((o for o in self.recent_orders() if str(o.get("id")) == str(order_id)), {})
+
+    def open_orders(self) -> list[dict[str, Any]]:
+        return [o for o in self.recent_orders() if str(o.get("status") or "").lower() in
+                {"queued", "unconfirmed", "confirmed", "partially_filled", "new", "accepted", "pending"}]
+
     def place_notional_buy(self, symbol: str, notional: Decimal, client_order_id: str) -> dict[str, Any]:
         symbol = symbol.upper().strip()
         if notional <= 0 or notional > self.max_order_usd:

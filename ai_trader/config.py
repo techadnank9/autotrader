@@ -80,8 +80,10 @@ class Settings:
     @classmethod
     def load(cls, dotenv_path: str = ".env") -> "Settings":
         _load_dotenv(Path(dotenv_path))
-        max_budget = _decimal_from_env("MAX_BUDGET_USD", "5")
-        default_budget = _decimal_from_env("DEFAULT_BUDGET_USD", "5")
+        # No fixed platform cap by default: orders are bounded by the account's own
+        # buying power, which the broker enforces. MAX_BUDGET_USD can still set one.
+        max_budget = _decimal_from_env("MAX_BUDGET_USD", "1000000")
+        default_budget = _decimal_from_env("DEFAULT_BUDGET_USD", "100")
         cash_reserve = _nonnegative_decimal_from_env("PORTFOLIO_CASH_RESERVE_USD", "5")
         max_position_pct = _decimal_from_env("PORTFOLIO_MAX_POSITION_PCT", "0.45")
         if max_position_pct > Decimal("1"):

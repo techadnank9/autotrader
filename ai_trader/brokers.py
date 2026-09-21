@@ -65,6 +65,15 @@ class NullBroker:
     def place_notional_buy(self, symbol: str, notional: Decimal, client_order_id: str) -> dict[str, Any]:
         return {"status": "blocked", "message": "No broker connected, so no order was placed."}
 
+    def place_buy(self, symbol: str, **_: Any) -> dict[str, Any]:
+        return {"status": "blocked", "message": "No broker connected, so no order was placed."}
+
+    def get_order(self, order_id: str) -> dict[str, Any]:
+        return {}
+
+    def open_orders(self) -> list[dict[str, Any]]:
+        return []
+
 
 class AlpacaBroker:
     name = "alpaca"
@@ -182,57 +191,96 @@ class AlpacaBroker:
         ]
 
     def place_notional_buy(self, symbol: str, notional: Decimal, client_order_id: str) -> dict[str, Any]:
+        return self.place_buy(symbol, notional=notional, client_order_id=client_order_id)
+
+    def place_buy(
+        self,
+        symbol: str,
+        *,
+        client_order_id: str,
+        notional: Decimal | None = None,
+        qty: Decimal | None = None,
+        take_profit: Decimal | None = None,
+        stop_loss: Decimal | None = None,
+        est_price: Decimal | None = None,
+    ) -> dict[str, Any]:
+        """A long buy by dollar amount or by shares, optionally with an exit plan.
+
+        Alpaca rules this follows: an exit plan is a bracket order, which needs
+        whole shares and uses gtc so its take-profit and stop-loss legs outlive
+        the trading day; dollar and fractional orders must be day orders; after
+        4pm ET orders queue for the next session.
+        """
         symbol = symbol.upper().strip()
-        ceiling = self.max_order_usd
-        if notional <= 0 or notional > ceiling:
-            return {"status": "blocked", "message": f"Order ${notional} is outside the ${ceiling} ceiling."}
         if not self.configured:
-            return {"status": "blocked", "message": "Alpaca keys are not set."}
+            return {"status": "blocked", "message": "No broker connected."}
+        if (notional is None) == (qty is None):
+            return {"status": "blocked", "message": "Choose a dollar amount or a number of shares."}
+        if notional is not None and notional <= 0 or qty is not None and qty <= 0:
+            return {"status": "blocked", "message": "Enter an amount greater than zero."}
+        bracket = take_profit is not None or stop_loss is not None
+        whole = qty is not None and qty == qty.to_integral_value()
+        if bracket and not whole:
+            return {"status": "blocked", "message": "An exit plan needs a whole number of shares."}
+
+        estimate = notional if notional is not None else (qty * est_price if est_price else None)
+        if estimate is not None and estimate > self.max_order_usd:
+            return {"status": "blocked", "message": f"Order is above the ${self.max_order_usd:,.2f} per-order limit."}
 
         try:
             asset = self._get(f"/v2/assets/{symbol}")
         except BrokerError as exc:
             return {"status": "blocked", "message": f"Could not verify {symbol}: {exc}"}
-        if not asset.get("tradable"):
-            return {"status": "blocked", "message": f"{symbol} is not tradable on Alpaca."}
-        if not asset.get("fractionable"):
-            return {"status": "blocked", "message": f"{symbol} does not support dollar-amount orders."}
-        if asset.get("class") != "us_equity":
-            return {"status": "blocked", "message": f"{symbol} is not a US equity."}
+        if not asset.get("tradable") or asset.get("class") != "us_equity":
+            return {"status": "blocked", "message": f"{symbol} cannot be traded here."}
+        if (notional is not None or not whole) and not asset.get("fractionable"):
+            return {"status": "blocked", "message": f"{symbol} can only be bought in whole shares."}
+
+        body: dict[str, Any] = {"symbol": symbol, "side": "buy", "type": "market",
+                                "client_order_id": client_order_id}
+        if notional is not None:
+            body.update(notional=f"{notional:.2f}", time_in_force="day")
+        else:
+            body.update(qty=str(int(qty)) if whole else f"{qty.normalize()}",
+                        time_in_force="gtc" if bracket else "day")
+        if bracket:
+            body["order_class"] = "bracket"
+            if take_profit is not None:
+                body["take_profit"] = {"limit_price": f"{take_profit:.2f}"}
+            if stop_loss is not None:
+                body["stop_loss"] = {"stop_price": f"{stop_loss:.2f}"}
 
         try:
-            r = httpx.post(
-                f"{self.base}/v2/orders",
-                headers=self._headers(),
-                json={
-                    "symbol": symbol,
-                    "notional": f"{notional:.2f}",
-                    "side": "buy",
-                    "type": "market",
-                    "time_in_force": "day",
-                    "client_order_id": client_order_id,
-                },
-                timeout=20,
-            )
+            r = httpx.post(f"{self.base}/v2/orders", headers=self._headers(), json=body, timeout=20)
         except httpx.HTTPError as exc:
             return {"status": "failed", "message": f"Could not reach Alpaca: {type(exc).__name__}"}
-
         if r.status_code >= 400:
             detail = r.json().get("message") if "json" in r.headers.get("content-type", "") else r.text[:200]
             return {"status": "rejected", "message": f"Alpaca rejected the order: {detail}"}
-
         o = r.json()
+        return {"status": "submitted", "broker": self.name, "mode": "live" if self.live else "paper",
+                "order_id": o.get("id"), "client_order_id": o.get("client_order_id"),
+                "symbol": o.get("symbol"), "order_status": o.get("status"),
+                "message": f"{'Live' if self.live else 'Paper'} order sent to Alpaca."}
+
+    def _order_view(self, o: dict[str, Any]) -> dict[str, Any]:
+        legs = o.get("legs") or []
         return {
-            "status": "submitted",
-            "broker": self.name,
-            "mode": "live" if self.live else "paper",
-            "order_id": o.get("id"),
-            "client_order_id": o.get("client_order_id"),
-            "symbol": o.get("symbol"),
-            "notional": o.get("notional"),
-            "order_status": o.get("status"),
-            "message": f"{'Live' if self.live else 'Paper'} order submitted to Alpaca.",
+            "id": o.get("id"), "symbol": o.get("symbol"), "side": o.get("side"),
+            "status": o.get("status"), "order_class": o.get("order_class") or "simple",
+            "notional": o.get("notional"), "qty": o.get("qty"),
+            "filled_qty": o.get("filled_qty"), "filled_avg_price": o.get("filled_avg_price"),
+            "submitted_at": o.get("submitted_at"), "accepted_at": o.get("created_at"),
+            "filled_at": o.get("filled_at"), "canceled_at": o.get("canceled_at"),
+            "take_profit": next((l.get("limit_price") for l in legs if l.get("type") == "limit"), None),
+            "stop_loss": next((l.get("stop_price") for l in legs if l.get("type") in ("stop", "stop_limit")), None),
         }
+
+    def get_order(self, order_id: str) -> dict[str, Any]:
+        return self._order_view(self._get(f"/v2/orders/{order_id}", {"nested": "true"}))
+
+    def open_orders(self) -> list[dict[str, Any]]:
+        return [self._order_view(o) for o in self._get("/v2/orders", {"status": "open", "nested": "true", "limit": 100})]
 
 
 def broker_for(creds: Any, settings: Settings) -> Broker:
