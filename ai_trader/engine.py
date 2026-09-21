@@ -294,11 +294,11 @@ class RecommendationEngine:
         self.settings = settings
         self.bright_data = BrightDataClient(settings)
         self.llm = CodexLLM(settings)
-        from ai_trader.ranker import ClaudeRanker
+        from ai_trader.ranker import make_ranker
         from ai_trader.research import ResearchService
 
         self.research = ResearchService(settings)
-        self.ranker = ClaudeRanker(settings)
+        self.ranker = make_ranker(settings)
 
     def analyze(self, request_model: AnalysisRequest) -> dict[str, Any]:
         pool = DEFAULT_UNIVERSE[: request_model.pool_size]
@@ -334,7 +334,7 @@ class RecommendationEngine:
                 result = self.ranker.rank(
                     research, weights={"reddit": weights.reddit, "x": weights.x, "realtime": weights.realtime}
                 )
-                ranking_mode = "claude"
+                ranking_mode = "model"
             except RankerError as exc:
                 ranking_note = str(exc)
                 result = self._evidence_only(research, pool, ranking_note)
@@ -363,6 +363,7 @@ class RecommendationEngine:
             "pool_size": request_model.pool_size,
             "trade_default": "no_op",
         }
+        result["meta"]["ranking_model"] = result.get("model")
         result["reasoning_trace"] = self._live_trace(research, result, ranking_mode, ranking_note)
         return result
 
@@ -410,8 +411,8 @@ class RecommendationEngine:
             {"stage": "dedupe", "title": "Collapsed into claims",
              "detail": f"{research['raw_hits']} articles became {research['claim_count']} distinct claims. "
                        "Syndicated copies of one story count once."},
-            {"stage": "ranking", "title": "Ranked" if mode == "claude" else "Not ranked",
-             "detail": (f"Claude scored the candidates: {top}." if mode == "claude"
+            {"stage": "ranking", "title": "Ranked" if mode == "model" else "Not ranked",
+             "detail": (f"{result.get('model') or 'The model'} scored the candidates: {top}." if mode == "model"
                         else (note or "Ranking skipped."))},
             {"stage": "decision", "title": "Recommendation",
              "detail": (f"Buy {rec.get('symbol')} at confidence {rec.get('confidence', 0):.2f}. {rec.get('rationale', '')}"

@@ -102,15 +102,7 @@ class ClaudeRanker:
         return bool(self.settings.anthropic_api_key)
 
     def rank(self, research: dict[str, Any], *, weights: dict[str, float]) -> dict[str, Any]:
-        claims_by_symbol: dict[str, list[dict[str, Any]]] = research.get("claims") or {}
-        valid_ids = {c["claim_id"] for cs in claims_by_symbol.values() for c in cs}
-
-        prompt = (
-            "Source weights set by the user (how much to trust each channel): "
-            f"{json.dumps(weights, sort_keys=True)}\n\n"
-            "Researched claims per ticker:\n"
-            f"{json.dumps(claims_by_symbol, indent=1, sort_keys=True)}"
-        )
+        prompt, valid_ids = build_prompt(research, weights)
 
         try:
             # Server-side refusal fallback is on by default for this model: if the
@@ -144,37 +136,112 @@ class ClaudeRanker:
         except ValidationError as exc:
             raise RankerError(f"Ranking did not match the schema: {exc.error_count()} error(s).") from exc
 
-        return self._to_payload(ranking, valid_ids, response)
+        usage = {"input_tokens": getattr(response.usage, "input_tokens", None),
+                 "output_tokens": getattr(response.usage, "output_tokens", None)}
+        return harden(ranking, valid_ids, getattr(response, "model", MODEL), usage)
 
-    @staticmethod
-    def _to_payload(ranking: Ranking, valid_ids: set[str], response: Any) -> dict[str, Any]:
-        pool = []
-        for c in ranking.pool:
-            cited = [cid for cid in c.claim_ids if cid in valid_ids]
-            score = c.score if cited else min(c.score, 0.29)  # uncited reasons cannot rank high
-            pool.append({"symbol": c.symbol.upper(), "score": round(score, 4),
-                         "reason": c.reason, "claim_ids": cited})
-        # Sort after capping, or an uncited candidate keeps the rank it was not allowed.
-        pool.sort(key=lambda row: row["score"], reverse=True)
 
-        rec = ranking.recommendation
-        decision = rec.decision if rec.decision in {"buy", "no_trade"} else "no_trade"
-        symbol = rec.symbol.upper() if (rec.symbol and decision == "buy") else None
-        if symbol and symbol not in {p["symbol"] for p in pool}:
-            decision, symbol = "no_trade", None  # never recommend something it did not rank
+def harden(ranking: Ranking, valid_ids: set[str], model: str, usage: dict[str, Any]) -> dict[str, Any]:
+    """Provider-independent safety checks on a ranking. Every model goes through this.
 
-        return {
-            "pool": pool,
-            "recommendation": {
-                "decision": decision,
-                "symbol": symbol,
-                "confidence": round(rec.confidence, 4),
-                "rationale": rec.rationale,
-                "risks": rec.risks,
-            },
-            "model": getattr(response, "model", MODEL),
-            "usage": {
-                "input_tokens": getattr(response.usage, "input_tokens", None),
-                "output_tokens": getattr(response.usage, "output_tokens", None),
-            },
-        }
+    - Citations to claim ids that do not exist are stripped.
+    - A reason with no valid citation is capped below 0.3.
+    - Sorting happens after capping, so an uncited pick cannot keep a high rank.
+    - Recommending a symbol that was not ranked is downgraded to no_trade.
+    """
+    pool = []
+    for c in ranking.pool:
+        cited = [cid for cid in c.claim_ids if cid in valid_ids]
+        score = max(0.0, min(1.0, c.score))
+        score = score if cited else min(score, 0.29)
+        pool.append({"symbol": c.symbol.upper(), "score": round(score, 4),
+                     "reason": c.reason, "claim_ids": cited})
+    pool.sort(key=lambda row: row["score"], reverse=True)
+
+    rec = ranking.recommendation
+    decision = rec.decision if rec.decision in {"buy", "no_trade"} else "no_trade"
+    symbol = rec.symbol.upper() if (rec.symbol and decision == "buy") else None
+    if symbol and symbol not in {p["symbol"] for p in pool}:
+        decision, symbol = "no_trade", None
+
+    return {
+        "pool": pool,
+        "recommendation": {
+            "decision": decision,
+            "symbol": symbol,
+            "confidence": round(max(0.0, min(1.0, rec.confidence)), 4),
+            "rationale": rec.rationale,
+            "risks": rec.risks,
+        },
+        "model": model,
+        "usage": usage,
+    }
+
+
+def build_prompt(research: dict[str, Any], weights: dict[str, float]) -> tuple[str, set[str]]:
+    claims_by_symbol: dict[str, list[dict[str, Any]]] = research.get("claims") or {}
+    valid_ids = {c["claim_id"] for cs in claims_by_symbol.values() for c in cs}
+    prompt = (
+        "Source weights set by the user (how much to trust each channel): "
+        f"{json.dumps(weights, sort_keys=True)}\n\n"
+        "Researched claims per ticker:\n"
+        f"{json.dumps(claims_by_symbol, indent=1, sort_keys=True)}"
+    )
+    return prompt, valid_ids
+
+
+class OpenAIRanker:
+    """Same contract and the same hardening as ClaudeRanker, on OpenAI's Responses API."""
+
+    def __init__(self, settings: Settings) -> None:
+        import openai
+
+        self._openai = openai
+        self.settings = settings
+        self.model = settings.openai_model
+        self.client = openai.OpenAI(api_key=settings.openai_api_key, max_retries=2, timeout=180.0)
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.settings.openai_api_key)
+
+    def rank(self, research: dict[str, Any], *, weights: dict[str, float]) -> dict[str, Any]:
+        oa = self._openai
+        prompt, valid_ids = build_prompt(research, weights)
+        try:
+            response = self.client.responses.parse(
+                model=self.model,
+                instructions=SYSTEM,
+                input=prompt,
+                text_format=Ranking,
+                reasoning={"effort": "high"},
+                max_output_tokens=16000,
+            )
+        except oa.AuthenticationError as exc:
+            raise RankerError("OpenAI API key was rejected.") from exc
+        except oa.RateLimitError as exc:
+            raise RankerError("OpenAI rate limit or quota hit; try again shortly.") from exc
+        except oa.BadRequestError as exc:
+            raise RankerError(f"OpenAI rejected the request: {str(exc)[:160]}") from exc
+        except oa.APIStatusError as exc:
+            raise RankerError(f"OpenAI API error {exc.status_code}.") from exc
+        except oa.APIConnectionError as exc:
+            raise RankerError("Could not reach the OpenAI API.") from exc
+
+        if getattr(response, "status", None) == "incomplete":
+            raise RankerError("Ranking was cut off before it finished.")
+        ranking = response.output_parsed
+        if ranking is None:
+            # No parsed output means the model refused or returned nothing usable.
+            raise RankerError("The model declined to rank this request.")
+
+        usage = {"input_tokens": getattr(response.usage, "input_tokens", None),
+                 "output_tokens": getattr(response.usage, "output_tokens", None)}
+        return harden(ranking, valid_ids, getattr(response, "model", self.model), usage)
+
+
+def make_ranker(settings: Settings):
+    """OpenAI when its key is set, otherwise Claude."""
+    if settings.openai_api_key:
+        return OpenAIRanker(settings)
+    return ClaudeRanker(settings)

@@ -215,7 +215,7 @@ def config() -> dict[str, Any]:
         "storage_backend": STORAGE_BACKEND,
         "capabilities": {
             "research_providers": engine.research.providers,
-            "ranking_model": "claude-opus-5" if engine.ranker.enabled else None,
+            "ranking_model": (getattr(engine.ranker, "model", None) or "claude-opus-5") if engine.ranker.enabled else None,
             "credential_storage": Cipher(settings.credentials_encryption_key).ready,
             "live_trading_allowed": settings.allow_live_trading,
             "google_login": bool(settings.google_client_id and settings.google_client_secret),

@@ -66,6 +66,8 @@ class Settings:
     tavily_api_key: str | None = None
     parallel_api_key: str | None = None
     anthropic_api_key: str | None = None
+    openai_api_key: str | None = None
+    openai_model: str = "gpt-5.6-sol"
     research_time_range: str = "day"
     credentials_encryption_key: str | None = None
     allow_live_trading: bool = False
@@ -156,6 +158,8 @@ class Settings:
             tavily_api_key=os.environ.get("TAVILY_API_KEY", "").strip() or None,
             parallel_api_key=os.environ.get("PARALLEL_API_KEY", "").strip() or None,
             anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY", "").strip() or None,
+            openai_api_key=os.environ.get("OPENAI_API_KEY", "").strip() or None,
+            openai_model=os.environ.get("OPENAI_MODEL", "gpt-5.6-sol").strip() or "gpt-5.6-sol",
             research_time_range=os.environ.get("RESEARCH_TIME_RANGE", "day").strip() or "day",
             credentials_encryption_key=os.environ.get("CREDENTIALS_ENCRYPTION_KEY", "").strip() or None,
             # Platform kill switch: users can connect paper accounts only, until the
