@@ -64,26 +64,45 @@
       location.href = "/login";
     };
 
-    // search: today's picks and holdings as suggestions; any ticker on Enter
+    // search: every US stock and ETF; your holdings and today's picks are labelled
     var form = top.querySelector(".search"), input = form.querySelector("input"), list = form.querySelector(".suggest");
-    var known = [];
+    var notes = {}, seq = 0, timer = null, hits = [], active = -1;
     Promise.all([api("/api/picks").catch(function () { return null; }), api("/api/portfolio").catch(function () { return null; })])
       .then(function (r) {
-        var seen = {};
-        ((r[1] && r[1].positions) || []).forEach(function (p) { if (!seen[p.symbol]) { seen[p.symbol] = 1; known.push({ s: p.symbol, note: "In your portfolio" }); } });
-        ((r[0] && r[0].picks) || []).forEach(function (p) { if (!seen[p.symbol]) { seen[p.symbol] = 1; known.push({ s: p.symbol, note: { buy: "Buy today", watch: "Watch", avoid: "Avoid" }[p.verdict] || "" }); } });
+        ((r[0] && r[0].picks) || []).forEach(function (p) { notes[p.symbol] = { buy: "Buy today", watch: "Watch", avoid: "Avoid" }[p.verdict] || ""; });
+        ((r[1] && r[1].positions) || []).forEach(function (p) { notes[p.symbol] = "You own this"; });
       });
-    function openStock(sym) { list.hidden = true; input.value = ""; input.blur(); if (window.StockPanel) window.StockPanel.open(sym, opts.stockOpts ? opts.stockOpts() : {}); }
-    input.addEventListener("input", function () {
-      var q = input.value.trim().toUpperCase();
-      var hits = q ? known.filter(function (k) { return k.s.indexOf(q) === 0; }).slice(0, 6) : [];
-      list.innerHTML = hits.map(function (k) { return '<li role="option" data-s="' + esc(k.s) + '"><b class="mono">' + esc(k.s) + '</b><span>' + esc(k.note) + '</span></li>'; }).join("");
+    function openStock(sym) { list.hidden = true; location.href = "/stock/" + encodeURIComponent(sym); }
+    function paint() {
+      list.innerHTML = hits.map(function (h, i) {
+        var note = h.restricted ? "Not available" : (notes[h.symbol] || (h.type === "etf" ? "ETF" : ""));
+        return '<li role="option" id="sg-' + i + '" aria-selected="' + (i === active) + '" data-s="' + esc(h.symbol) + '"><span class="sg-l"><b class="mono">' + esc(h.symbol) + '</b><em>' + esc(h.name || "") + '</em></span><span>' + esc(note) + '</span></li>';
+      }).join("");
       list.hidden = !hits.length;
+      input.setAttribute("aria-activedescendant", active >= 0 ? "sg-" + active : "");
+    }
+    input.addEventListener("input", function () {
+      clearTimeout(timer);
+      var q = input.value.trim(), my = ++seq;
+      if (!q) { hits = []; paint(); return; }
+      timer = setTimeout(function () {
+        api("/api/search?q=" + encodeURIComponent(q)).then(function (d) {
+          if (my !== seq) return;
+          hits = (d.results || []).slice(0, 8); active = hits.length ? 0 : -1; paint();
+        }).catch(function () {});
+      }, 180);
+    });
+    input.addEventListener("keydown", function (e) {
+      if (list.hidden || !hits.length) return;
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault(); active = (active + (e.key === "ArrowDown" ? 1 : hits.length - 1)) % hits.length; paint();
+      } else if (e.key === "Escape") { list.hidden = true; }
     });
     list.addEventListener("mousedown", function (e) { var li = e.target.closest("li"); if (li) { e.preventDefault(); openStock(li.dataset.s); } });
     input.addEventListener("blur", function () { setTimeout(function () { list.hidden = true; }, 120); });
     form.addEventListener("submit", function (e) {
       e.preventDefault();
+      if (!list.hidden && hits[active]) return openStock(hits[active].symbol);
       var q = input.value.trim().toUpperCase().replace(/[^A-Z.]/g, "");
       if (q) openStock(q);
     });

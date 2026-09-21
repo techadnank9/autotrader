@@ -6,17 +6,13 @@
   var LABEL = { buy: "Buy", watch: "Watch", avoid: "Avoid" };
   var view = null;
 
-  function stockOpts(symbol) {
-    var pick = view && view.picks.find(function (p) { return p.symbol === symbol; });
-    return { view: view, pick: pick, onBought: function (s) { if (view.bought.indexOf(s) === -1) view.bought.push(s); renderPicks(view); loadAccount(); } };
-  }
-  function openStock(symbol) { window.StockPanel.open(symbol, stockOpts(symbol)); }
+  function openStock(symbol, buy) { location.href = "/stock/" + encodeURIComponent(symbol) + (buy ? "?buy=1" : ""); }
 
   function pickRow(p, v) {
     var bought = v.bought.indexOf(p.symbol) !== -1;
     var action = p.verdict !== "buy" ? "" : bought
       ? '<span class="tag ok">Bought</span>'
-      : '<button class="btn btn-primary btn-sm" data-open="' + esc(p.symbol) + '" type="button">Buy</button>';
+      : '<button class="btn btn-primary btn-sm" data-open="' + esc(p.symbol) + '" data-buy="1" type="button">Buy</button>';
     return '<article class="pick v-' + esc(p.verdict) + '">' +
       '<div class="pick-id"><button class="pick-sym mono link-btn" data-open="' + esc(p.symbol) + '" type="button" aria-label="Open ' + esc(p.symbol) + '">' + esc(p.symbol) + '</button>' +
         '<span class="verdict v-' + esc(p.verdict) + '">' + (LABEL[p.verdict] || "Watch") + '</span></div>' +
@@ -39,7 +35,7 @@
       '<p class="picks-lead">' + (buys ? buys + (buys === 1 ? " stock looks" : " stocks look") + " worth buying today."
         : "No strong buys today. Nothing in today’s news clears the bar, so here is what we’re watching.") + '</p>' +
       '<div class="pick-list">' + v.picks.map(function (p) { return pickRow(p, v); }).join("") + '</div>';
-    document.querySelectorAll("[data-open]").forEach(function (b) { b.onclick = function () { openStock(b.dataset.open); }; });
+    document.querySelectorAll("[data-open]").forEach(function (b) { b.onclick = function () { openStock(b.dataset.open, b.dataset.buy); }; });
   }
 
   async function loadPicks(force) {
@@ -66,7 +62,7 @@
   }
 
   async function boot() {
-    var user = await window.Shell.mount({ active: "picks", stockOpts: function () { return { view: view, onBought: stockOpts("").onBought }; } });
+    var user = await window.Shell.mount({ active: "picks" });
     if (!user) return;
     if (user.is_demo) $("demo-note").hidden = false;
     var welcome = new URLSearchParams(location.search).get("welcome");

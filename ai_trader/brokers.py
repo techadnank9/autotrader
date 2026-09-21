@@ -74,6 +74,9 @@ class NullBroker:
     def open_orders(self) -> list[dict[str, Any]]:
         return []
 
+    def cancel_order(self, order_id: str) -> dict[str, Any]:
+        return {"status": "failed", "message": "No broker connected."}
+
 
 class AlpacaBroker:
     name = "alpaca"
@@ -203,8 +206,11 @@ class AlpacaBroker:
         take_profit: Decimal | None = None,
         stop_loss: Decimal | None = None,
         est_price: Decimal | None = None,
+        limit_price: Decimal | None = None,
+        good_until: str = "day",
     ) -> dict[str, Any]:
-        """A long buy by dollar amount or by shares, optionally with an exit plan.
+        """A long buy now (market) or at a price (limit), by dollars or shares,
+        optionally with an exit plan.
 
         Alpaca rules this follows: an exit plan is a bracket order, which needs
         whole shares and uses gtc so its take-profit and stop-loss legs outlive
@@ -222,6 +228,13 @@ class AlpacaBroker:
         whole = qty is not None and qty == qty.to_integral_value()
         if bracket and not whole:
             return {"status": "blocked", "message": "An exit plan needs a whole number of shares."}
+        if limit_price is not None:
+            if limit_price <= 0:
+                return {"status": "blocked", "message": "Enter a price above zero."}
+            if notional is not None:
+                return {"status": "blocked", "message": "An order at a price needs a number of shares."}
+            if good_until == "gtc" and not whole:
+                return {"status": "blocked", "message": "Orders that stay open need whole shares."}
 
         estimate = notional if notional is not None else (qty * est_price if est_price else None)
         if estimate is not None and estimate > self.max_order_usd:
@@ -236,13 +249,17 @@ class AlpacaBroker:
         if (notional is not None or not whole) and not asset.get("fractionable"):
             return {"status": "blocked", "message": f"{symbol} can only be bought in whole shares."}
 
-        body: dict[str, Any] = {"symbol": symbol, "side": "buy", "type": "market",
+        body: dict[str, Any] = {"symbol": symbol, "side": "buy",
+                                "type": "limit" if limit_price is not None else "market",
                                 "client_order_id": client_order_id}
+        if limit_price is not None:
+            body["limit_price"] = f"{limit_price:.2f}" if limit_price >= 1 else f"{limit_price:.4f}"
         if notional is not None:
             body.update(notional=f"{notional:.2f}", time_in_force="day")
         else:
-            body.update(qty=str(int(qty)) if whole else f"{qty.normalize()}",
-                        time_in_force="gtc" if bracket else "day")
+            # Exit-plan legs must outlive the day, so a bracket is always gtc.
+            tif = "gtc" if (bracket or good_until == "gtc") else "day"
+            body.update(qty=str(int(qty)) if whole else f"{qty.normalize()}", time_in_force=tif)
         if bracket:
             body["order_class"] = "bracket"
             if take_profit is not None:
@@ -272,6 +289,8 @@ class AlpacaBroker:
             "filled_qty": o.get("filled_qty"), "filled_avg_price": o.get("filled_avg_price"),
             "submitted_at": o.get("submitted_at"), "accepted_at": o.get("created_at"),
             "filled_at": o.get("filled_at"), "canceled_at": o.get("canceled_at"),
+            "type": o.get("type"), "limit_price": o.get("limit_price"), "time_in_force": o.get("time_in_force"),
+            "cancelable": o.get("status") in {"new", "accepted", "pending_new", "partially_filled", "held", "accepted_for_bidding"},
             "take_profit": next((l.get("limit_price") for l in legs if l.get("type") == "limit"), None),
             "stop_loss": next((l.get("stop_price") for l in legs if l.get("type") in ("stop", "stop_limit")), None),
         }
@@ -281,6 +300,20 @@ class AlpacaBroker:
 
     def open_orders(self) -> list[dict[str, Any]]:
         return [self._order_view(o) for o in self._get("/v2/orders", {"status": "open", "nested": "true", "limit": 100})]
+
+    def cancel_order(self, order_id: str) -> dict[str, Any]:
+        """Cancel an open order. Cancelling a bracket's entry also cancels its exit legs."""
+        try:
+            r = httpx.delete(f"{self.base}/v2/orders/{order_id}", headers=self._headers(), timeout=20)
+        except httpx.HTTPError as exc:
+            return {"status": "failed", "message": f"Could not reach Alpaca: {type(exc).__name__}"}
+        if r.status_code in (200, 204):
+            return {"status": "canceled", "message": "Order canceled."}
+        if r.status_code == 404:
+            return {"status": "failed", "message": "That order was not found."}
+        if r.status_code == 422:
+            return {"status": "failed", "message": "That order can no longer be canceled; it may have filled."}
+        return {"status": "failed", "message": f"Alpaca could not cancel it ({r.status_code})."}
 
 
 def broker_for(creds: Any, settings: Settings) -> Broker:

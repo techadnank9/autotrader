@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Stock — AI Trader</title>
+<meta name="theme-color" content="#08090B">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/app.css?v=20260921154453">
+<link rel="stylesheet" href="/static/dashboard.css?v=20260921154453">
+</head>
+<body>
+<main class="page stock-page">
+  <div class="sp-grid">
+    <div class="sp-main">
+      <section class="call" aria-labelledby="sp-name">
+        <div class="sp-head"><div><h1 id="sp-name">Loading…</h1><p class="sp-sub" id="sp-sub"></p></div><span class="verdict" id="sp-verdict" hidden></span></div>
+        <p class="sp-price"><span class="mono" id="sp-price"></span> <span class="mono" id="sp-chg"></span></p>
+        <p class="sp-asof" id="sp-asof"></p>
+        <div class="seg sp-ranges" role="group" aria-label="Chart range" id="ranges">
+          <button type="button" data-r="1D">1D</button><button type="button" data-r="5D">5D</button><button type="button" data-r="1M" aria-pressed="true">1M</button><button type="button" data-r="3M">3M</button><button type="button" data-r="6M">6M</button><button type="button" data-r="1Y">1Y</button><button type="button" data-r="5Y">5Y</button>
+        </div>
+        <p class="sp-range-chg" id="range-chg"></p>
+        <div class="chart-wrap sp-chart" id="chart"><p class="skel">Loading chart…</p></div>
+      </section>
+
+      <section class="panel" aria-labelledby="mv-h"><h2 id="mv-h">How it's moving</h2><div id="moving"></div></section>
+      <section class="panel" aria-labelledby="st-h"><h2 id="st-h">Key statistics</h2><dl class="kv" id="stats"></dl><p class="src-line" id="sources"></p></section>
+      <section class="panel" aria-labelledby="rd-h" id="read-sec" hidden><h2 id="rd-h">Our read today</h2><div id="read"></div></section>
+      <section class="panel" aria-labelledby="ps-h" id="pos-sec" hidden><h2 id="ps-h">Your position</h2><dl class="tiles" id="position"></dl></section>
+      <section class="panel" aria-labelledby="oo-h" id="oo-sec" hidden><h2 id="oo-h">Your open orders</h2><div id="orders"></div></section>
+    </div>
+
+    <aside class="sp-side" aria-label="Order">
+      <section class="panel ticket" id="ticket"><p class="skel">Loading…</p></section>
+    </aside>
+  </div>
+</main>
+<script src="/static/charts.js?v=20260921154453"></script>
+<script src="/static/shell.js?v=20260921154453"></script>
+<script src="/static/stockpage.js?v=20260921154453"></script>
+</body>
+</html>

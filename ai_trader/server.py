@@ -61,6 +61,7 @@ def _execute_decision(decision: Decision) -> dict[str, Any]:
         decision.symbol, client_order_id=decision.decision_id,
         notional=dec("notional"), qty=dec("qty"),
         take_profit=dec("take_profit"), stop_loss=dec("stop_loss"), est_price=dec("est_price"),
+        limit_price=dec("limit_price"), good_until=spec.get("good_until") or "day",
     )
 
 
@@ -235,6 +236,13 @@ def portfolio_page(aitrader_session: str | None = Cookie(default=None)):
     if _needs_broker(user):
         return RedirectResponse("/connect", status_code=303)
     return FileResponse(STATIC_DIR / "portfolio.html")
+
+
+@app.get("/stock/{symbol}")
+def stock_page(symbol: str, aitrader_session: str | None = Cookie(default=None)):
+    if _current_user(aitrader_session) is None:
+        return RedirectResponse("/login", status_code=303)
+    return FileResponse(STATIC_DIR / "stockpage.html")
 
 
 @app.get("/legacy")
@@ -864,87 +872,210 @@ def refresh_picks(aitrader_session: str | None = Cookie(default=None)) -> dict[s
     return _picks_view(picks.refresh(), user)
 
 
-class BuyPickPayload(BaseModel):
-    run_id: str
+class OrderPayload(BaseModel):
     symbol: str
     mode: str = Field(default="dollars", pattern="^(dollars|shares)$")
     amount: str
+    order_type: str = Field(default="market", pattern="^(market|limit)$")
+    limit_price: str | None = None
+    good_until: str = Field(default="day", pattern="^(day|gtc)$")
     take_profit_pct: float | None = Field(default=None, gt=0, le=1000)
     stop_loss_pct: float | None = Field(default=None, gt=0, lt=100)
+    run_id: str | None = None
 
 
-@app.post("/api/picks/buy")
-def buy_pick(payload: BuyPickPayload, aitrader_session: str | None = Cookie(default=None)) -> dict[str, Any]:
-    """The user's Buy. It is the approval, and it goes through the same gate as every order."""
+class BuyPickPayload(OrderPayload):
+    run_id: str
+
+
+def _alpaca_data_for(user):
+    """The user's own Alpaca keys, for market data, when they connected Alpaca."""
+    if user.is_demo:
+        return None
+    try:
+        c = credential_store.get(user.user_id, "alpaca")
+    except CredentialError:
+        return None
+    return market.AlpacaData(c.key_id, c.secret_key) if c else None
+
+
+def _dec(raw: str | None, what: str) -> Decimal:
+    try:
+        v = Decimal(str(raw).strip().replace(",", "").lstrip("$"))
+    except (InvalidOperation, AttributeError):
+        raise HTTPException(status_code=400, detail=f"Enter a number for {what}.")
+    if v <= 0:
+        raise HTTPException(status_code=400, detail=f"Enter {what} greater than zero.")
+    return v
+
+
+def _place_order(user, payload: OrderPayload) -> dict[str, Any]:
+    """Every buy, from a pick or from search, goes through here and the decision gate."""
     from decimal import ROUND_DOWN
 
-    user = _require_user(aitrader_session)
     if user.is_demo:
         raise HTTPException(status_code=403, detail="Create an account and connect a broker to buy.")
-    run = picks_store.latest()
-    if not run or run["run_id"] != payload.run_id:
-        raise HTTPException(status_code=409, detail="These picks have been updated. Refresh to see the latest.")
+    if _needs_broker(user):
+        raise HTTPException(status_code=400, detail="Connect a broker to buy.")
     symbol = payload.symbol.upper().strip()
-    pick = next((p for p in run.get("picks", []) if p["symbol"] == symbol), None)
-    if not pick or pick.get("verdict") != "buy":
-        raise HTTPException(status_code=400, detail=f"{symbol} is not a buy in today's picks.")
-    if symbol in _bought_from(run["run_id"], user.user_id):
-        raise HTTPException(status_code=409, detail=f"You already bought {symbol} from today's picks.")
+    if not symbol.replace(".", "").isalnum() or len(symbol) > 8:
+        raise HTTPException(status_code=400, detail="That is not a stock symbol.")
+
+    pick, run = None, None
+    if payload.run_id:
+        run = picks_store.latest()
+        if not run or run["run_id"] != payload.run_id:
+            raise HTTPException(status_code=409, detail="These picks have been updated. Refresh to see the latest.")
+        pick = next((p for p in run.get("picks", []) if p["symbol"] == symbol), None)
+        if symbol in _bought_from(run["run_id"], user.user_id):
+            raise HTTPException(status_code=409, detail=f"You already bought {symbol} from today's picks.")
 
     try:
-        amount = Decimal(payload.amount.strip().replace(",", "").lstrip("$"))
-    except (InvalidOperation, AttributeError):
-        raise HTTPException(status_code=400, detail="Enter a number.")
-    if amount <= 0:
-        raise HTTPException(status_code=400, detail="Enter an amount greater than zero.")
-    try:
-        price = Decimal(str(market.context(symbol)["price"]))
+        ctx = market.context(symbol)
     except market.MarketDataError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    price = Decimal(str(ctx["price"]))
+    if price < 1:
+        raise HTTPException(status_code=400, detail=f"{symbol} trades under $1. Penny stocks aren't available here.")
+    if market.is_leveraged_or_inverse(ctx.get("name")):
+        raise HTTPException(status_code=400, detail=f"{symbol} is a leveraged or inverse fund, which isn't available here.")
 
+    amount = _dec(payload.amount, "an amount")
+    limit = _dec(payload.limit_price, "a price") if payload.order_type == "limit" else None
+    entry = limit or price
     exit_plan = payload.take_profit_pct is not None or payload.stop_loss_pct is not None
+    stays_open = payload.good_until == "gtc" or exit_plan  # exit legs must outlive the day
     notional = qty = None
     note = None
+
     if payload.mode == "dollars":
-        if exit_plan:
-            # Exit plans are bracket orders, which need whole shares.
-            qty = (amount / price).to_integral_value(rounding=ROUND_DOWN)
+        if limit is None and not exit_plan:
+            notional = amount.quantize(Decimal("0.01"))
+        elif limit is not None and not stays_open:
+            qty = (amount / entry).quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
+            if qty <= 0:
+                raise HTTPException(status_code=400, detail="That amount buys less than a sliver of a share.")
+        else:
+            qty = (amount / entry).to_integral_value(rounding=ROUND_DOWN)
+            why = "the exit plan can be attached" if exit_plan else "the order can stay open"
             if qty < 1:
                 raise HTTPException(status_code=400, detail=(
-                    f"An exit plan needs at least one whole share (about ${price:,.2f}). "
-                    "Raise the amount or remove the exit plan."))
-            note = f"Buying {qty} whole share{'s' if qty != 1 else ''} so the exit plan can be attached."
-        else:
-            notional = amount.quantize(Decimal("0.01"))
+                    f"This needs at least one whole share (about ${entry:,.2f}) so {why}. Raise the amount."))
+            note = f"Buying {qty} whole share{'s' if qty != 1 else ''} so {why}."
     else:
         qty = amount
-        if exit_plan and qty != qty.to_integral_value():
-            raise HTTPException(status_code=400, detail="An exit plan needs a whole number of shares.")
+        if stays_open and qty != qty.to_integral_value():
+            raise HTTPException(status_code=400, detail=(
+                "An exit plan needs a whole number of shares." if exit_plan
+                else "An order that stays open needs a whole number of shares."))
 
-    take_profit = (price * (1 + Decimal(str(payload.take_profit_pct)) / 100)).quantize(Decimal("0.01")) \
+    tp = (entry * (1 + Decimal(str(payload.take_profit_pct)) / 100)).quantize(Decimal("0.01")) \
         if payload.take_profit_pct is not None else None
-    stop_loss = (price * (1 - Decimal(str(payload.stop_loss_pct)) / 100)).quantize(Decimal("0.01")) \
+    sl = (entry * (1 - Decimal(str(payload.stop_loss_pct)) / 100)).quantize(Decimal("0.01")) \
         if payload.stop_loss_pct is not None else None
-    estimate = notional if notional is not None else (qty * price).quantize(Decimal("0.01"))
+    estimate = notional if notional is not None else (qty * entry).quantize(Decimal("0.01"))
     if estimate > settings.max_budget_usd:
         raise HTTPException(status_code=400, detail=f"Above the ${settings.max_budget_usd:,.2f} per-order limit.")
 
     order = {"notional": str(notional) if notional is not None else None,
              "qty": str(qty) if qty is not None else None,
-             "take_profit": str(take_profit) if take_profit is not None else None,
-             "stop_loss": str(stop_loss) if stop_loss is not None else None,
+             "limit_price": str(limit) if limit is not None else None,
+             "good_until": "gtc" if stays_open and notional is None else "day",
+             "take_profit": str(tp) if tp is not None else None,
+             "stop_loss": str(sl) if sl is not None else None,
              "est_price": str(price)}
     decision = decisions.propose(
         user_id=user.user_id, enforce_open_limit=False,
         symbol=symbol, side="buy", amount_usd=estimate,
-        confidence=float(pick.get("score") or 0), reason=pick.get("summary") or "",
+        confidence=float((pick or {}).get("score") or 0),
+        reason=(pick or {}).get("summary") or "Bought on the user's own judgment.",
         ttl_minutes=settings.decision_ttl_minutes,
-        policy={"long_only": True, "run_id": run["run_id"], "order": order},
+        policy={"long_only": True, "run_id": run["run_id"] if run else None,
+                "source": "pick" if pick else "search", "order": order},
     )
     decision = decisions.answer(decision.decision_id, approved=True,
-                                responder=f"picks:{user.user_id}", user_id=user.user_id)
+                                responder=f"user:{user.user_id}", user_id=user.user_id)
     return {"decision": decision.to_dict(), "execution": decision.execution or {}, "note": note,
             "order": {**order, "estimate": str(estimate)}}
+
+
+@app.post("/api/picks/buy")
+def buy_pick(payload: BuyPickPayload, aitrader_session: str | None = Cookie(default=None)) -> dict[str, Any]:
+    return _place_order(_require_user(aitrader_session), payload)
+
+
+@app.post("/api/orders")
+def place_order(payload: OrderPayload, aitrader_session: str | None = Cookie(default=None)) -> dict[str, Any]:
+    """Buy any US stock, not only today's picks: the user's own call."""
+    return _place_order(_require_user(aitrader_session), payload)
+
+
+@app.delete("/api/orders/{order_id}")
+def cancel_order(order_id: str, aitrader_session: str | None = Cookie(default=None)) -> dict[str, Any]:
+    user = _require_user(aitrader_session)
+    result = _broker_for_user(user.user_id).cancel_order(order_id)
+    if result.get("status") != "canceled":
+        raise HTTPException(status_code=409, detail=result.get("message") or "Could not cancel.")
+    return result
+
+
+@app.get("/api/search")
+def search_stocks(q: str = "", aitrader_session: str | None = Cookie(default=None)) -> dict[str, Any]:
+    _require_user(aitrader_session)
+    return {"results": market.search(q[:40])}
+
+
+@app.get("/api/stock/{symbol}/overview")
+def stock_overview(symbol: str, aitrader_session: str | None = Cookie(default=None)) -> dict[str, Any]:
+    """Everything the stock page shows, in one call."""
+    user = _require_user(aitrader_session)
+    symbol = symbol.upper().strip()
+    alpaca = _alpaca_data_for(user)
+    try:
+        stats = market.stats(symbol, alpaca)
+    except market.MarketDataError as exc:
+        raise HTTPException(status_code=404, detail=f"Could not find {symbol}.") from exc
+    try:
+        ctx = market.context(symbol)
+    except market.MarketDataError:
+        ctx = {}
+    run = picks_store.latest()
+    pick = next((p for p in (run or {}).get("picks", []) if p["symbol"] == symbol), None)
+    broker = _broker_for_user(user.user_id)
+    position, orders = None, []
+    if broker.configured:
+        try:
+            position = next((p for p in broker.positions() if p.get("symbol") == symbol), None)
+            orders = [o for o in broker.open_orders() if o.get("symbol") == symbol]
+        except BrokerError:
+            pass
+    restricted = None
+    if (stats.get("price") or 0) < 1:
+        restricted = "Penny stocks (under $1) aren't available here."
+    elif market.is_leveraged_or_inverse(stats.get("name")):
+        restricted = "Leveraged and inverse funds aren't available here."
+    status = broker.status() if broker.configured else {}
+    return {
+        "stats": stats, "context": ctx, "pick": pick,
+        "run_id": run["run_id"] if run and pick else None,
+        "bought_from_picks": bool(run and pick and symbol in _bought_from(run["run_id"], user.user_id)),
+        "position": position, "open_orders": orders,
+        "restricted": restricted,
+        "can_trade": broker.configured and not user.is_demo,
+        "is_demo": user.is_demo,
+        "broker": broker.name, "mode": "live" if getattr(broker, "live", False) else "paper",
+        "buying_power": status.get("buying_power"),
+        "default_amount": f"{settings.default_budget_usd:.2f}",
+    }
+
+
+@app.get("/api/stock/{symbol}/history")
+def stock_history(symbol: str, range: str = "1M", aitrader_session: str | None = Cookie(default=None)) -> dict[str, Any]:
+    user = _require_user(aitrader_session)
+    try:
+        return market.history(symbol, range, _alpaca_data_for(user))
+    except market.MarketDataError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @app.get("/api/stock/{symbol}/context")

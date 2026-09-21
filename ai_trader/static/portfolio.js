@@ -26,7 +26,7 @@
     $("positions").innerHTML = '<div class="tbl" role="table"><div class="tr th" role="row"><span>Stock</span><span>Shares</span><span>Avg cost</span><span>Price</span><span>Value</span><span>Gain</span></div>' +
       p.positions.map(function (x) {
         var plpc = x.unrealized_plpc != null ? x.unrealized_plpc * 100 : null;
-        return '<div class="tr" role="row"><span><button class="link-btn mono" data-open="' + esc(x.symbol) + '" type="button">' + esc(x.symbol) + '</button></span>' +
+        return '<div class="tr" role="row"><span><a class="link-btn mono" href="/stock/' + encodeURIComponent(x.symbol) + '">' + esc(x.symbol) + '</a></span>' +
           '<span class="mono">' + (Number(x.quantity) % 1 ? Number(x.quantity).toFixed(4) : x.quantity) + '</span>' +
           '<span class="mono">' + (x.avg_entry_price ? money(x.avg_entry_price) : "—") + '</span>' +
           '<span class="mono">' + (x.current_price ? money(x.current_price) : "—") + '</span>' +
@@ -39,10 +39,21 @@
     if (!p.open_orders.length) { $("orders").innerHTML = '<p class="empty">Nothing open.</p>'; return; }
     $("orders").innerHTML = '<div class="tbl orders" role="table">' + p.open_orders.map(function (o) {
       var what = o.notional ? money(o.notional) : (o.qty ? o.qty + " sh" : "");
-      var legs = [o.take_profit ? "take profit " + money(o.take_profit) : "", o.stop_loss ? "stop loss " + money(o.stop_loss) : ""].filter(Boolean).join(" · ");
-      return '<div class="tr" role="row"><span class="mono"><b>' + esc(o.symbol) + '</b></span><span>' + esc(o.side || "buy") + ' ' + esc(what) + '</span>' +
-        '<span><span class="tag">' + esc((o.status || "").replace(/_/g, " ")) + '</span></span><span class="muted">' + esc(legs) + '</span></div>';
+      var at = o.limit_price ? " at " + money(o.limit_price) : "";
+      var till = o.time_in_force === "gtc" ? "until canceled" : "today";
+      var legs = [till, o.take_profit ? "take profit " + money(o.take_profit) : "", o.stop_loss ? "stop loss " + money(o.stop_loss) : ""].filter(Boolean).join(" · ");
+      return '<div class="tr" role="row"><span class="mono"><a class="link-btn" href="/stock/' + encodeURIComponent(o.symbol) + '"><b>' + esc(o.symbol) + '</b></a></span><span>' + esc(o.side || "buy") + ' ' + esc(what) + esc(at) + '</span>' +
+        '<span><span class="tag">' + esc((o.status || "").replace(/_/g, " ")) + '</span></span><span class="muted">' + esc(legs) + '</span>' +
+        '<span>' + (o.cancelable !== false ? '<button class="btn btn-ghost btn-sm" data-cancel="' + esc(o.id) + '" type="button">Cancel</button>' : '') + '</span></div>';
     }).join("") + '</div>';
+    document.querySelectorAll("#orders [data-cancel]").forEach(function (b) {
+      b.onclick = async function () {
+        if (!confirm("Cancel this order?")) return;
+        b.disabled = true; b.textContent = "Canceling…";
+        try { await api("/api/orders/" + encodeURIComponent(b.dataset.cancel), { method: "DELETE" }); load(); loadHistory(); }
+        catch (err) { b.disabled = false; b.textContent = "Cancel"; alert(err.message); }
+      };
+    });
   }
 
   async function loadChart() {
@@ -87,12 +98,11 @@
       }
       if (p.error) { $("summary").innerHTML = '<p class="empty">' + esc(p.error) + '</p>'; return; }
       renderSummary(p); renderPositions(p); renderOrders(p);
-      document.querySelectorAll("[data-open]").forEach(function (b) { b.onclick = function () { window.StockPanel.open(b.dataset.open, { onBought: load }); }; });
     } catch (err) { $("summary").innerHTML = '<p class="empty">Could not load your account: ' + esc(err.message) + '</p>'; }
   }
 
   async function boot() {
-    var user = await window.Shell.mount({ active: "portfolio", stockOpts: function () { return { onBought: load }; } });
+    var user = await window.Shell.mount({ active: "portfolio" });
     if (!user) return;
     isDemo = !!user.is_demo;
     document.querySelectorAll("#periods button").forEach(function (b) {

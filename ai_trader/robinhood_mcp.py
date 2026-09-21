@@ -461,14 +461,22 @@ class RobinhoodBroker:
 
     def place_buy(self, symbol: str, *, client_order_id: str, notional: Decimal | None = None,
                   qty: Decimal | None = None, take_profit: Decimal | None = None,
-                  stop_loss: Decimal | None = None, est_price: Decimal | None = None) -> dict[str, Any]:
-        if qty is not None or take_profit is not None or stop_loss is not None:
+                  stop_loss: Decimal | None = None, est_price: Decimal | None = None,
+                  limit_price: Decimal | None = None, good_until: str = "day") -> dict[str, Any]:
+        if qty is not None or take_profit is not None or stop_loss is not None or limit_price is not None:
             return {"status": "blocked", "broker": self.name,
-                    "message": "With Robinhood, buy by dollar amount without an exit plan for now."}
+                    "message": "With Robinhood, buy now by dollar amount, without a price or exit plan, for now."}
         return self.place_notional_buy(symbol, notional or Decimal("0"), client_order_id)
 
     def get_order(self, order_id: str) -> dict[str, Any]:
         return next((o for o in self.recent_orders() if str(o.get("id")) == str(order_id)), {})
+
+    def cancel_order(self, order_id: str) -> dict[str, Any]:
+        try:
+            self._client().call("cancel_equity_order", {"order_id": order_id})
+        except RobinhoodError as exc:
+            return {"status": "failed", "message": str(exc)}
+        return {"status": "canceled", "message": "Order canceled."}
 
     def open_orders(self) -> list[dict[str, Any]]:
         return [o for o in self.recent_orders() if str(o.get("status") or "").lower() in
