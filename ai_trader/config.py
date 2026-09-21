@@ -63,6 +63,13 @@ class Settings:
     session_secret: str = "dev-insecure-session-secret"
     session_secure_cookie: bool = False
     database_url: str | None = None
+    tavily_api_key: str | None = None
+    parallel_api_key: str | None = None
+    anthropic_api_key: str | None = None
+    alpaca_key_id: str | None = None
+    alpaca_secret_key: str | None = None
+    alpaca_live: bool = False
+    research_time_range: str = "day"
 
     @classmethod
     def load(cls, dotenv_path: str = ".env") -> "Settings":
@@ -144,6 +151,14 @@ class Settings:
             database_url=os.environ.get("DATABASE_URL", "").strip()
             or os.environ.get("POSTGRES_URL", "").strip()
             or None,
+            tavily_api_key=os.environ.get("TAVILY_API_KEY", "").strip() or None,
+            parallel_api_key=os.environ.get("PARALLEL_API_KEY", "").strip() or None,
+            anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY", "").strip() or None,
+            alpaca_key_id=(os.environ.get("ALPACA_KEY_ID", "") or os.environ.get("APCA_API_KEY_ID", "")).strip() or None,
+            alpaca_secret_key=(os.environ.get("ALPACA_SECRET_KEY", "") or os.environ.get("APCA_API_SECRET_KEY", "")).strip() or None,
+            # Live trading must be switched on deliberately; anything else stays paper.
+            alpaca_live=os.environ.get("ALPACA_LIVE", "").strip().lower() == "true",
+            research_time_range=os.environ.get("RESEARCH_TIME_RANGE", "day").strip() or "day",
         )
 
 def _nonnegative_decimal_from_env(name: str, default: str) -> Decimal:

@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Profile — AI Trader</title>
+<meta name="theme-color" content="#08090B">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/app.css">
+<link rel="stylesheet" href="/static/dashboard.css">
+<style>
+  .conn{margin-top:18px;display:flex;flex-direction:column}
+  .conn-row{display:grid;grid-template-columns:150px 1fr auto;gap:16px;padding:15px 0;border-top:1px solid var(--line);align-items:center}
+  .conn-row:first-child{border-top:0}
+  .conn-name{font-weight:500;font-size:14.5px}
+  .conn-detail{color:var(--text-2);font-size:13.5px}
+  .pill{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;padding:4px 11px;border-radius:99px;background:var(--surface-2);color:var(--text-2);white-space:nowrap}
+  .pill i{width:6px;height:6px;border-radius:50%;background:#5b6472;flex:none}
+  .pill.on{background:#1d2a12;color:#cdeb7e}
+  .pill.on i{background:var(--accent)}
+  .pill.warn{background:#2b2312;color:#f2cf86}
+  .pill.warn i{background:#e0a93a}
+  @media (max-width:880px){.conn-row{grid-template-columns:1fr auto}.conn-detail{grid-column:1 / -1;order:3}}
+</style>
+</head>
+<body>
+<header class="topbar">
+  <div class="bar">
+    <a class="brand" href="/">
+      <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="1.5" y="1.5" width="21" height="21" rx="6.5" stroke="#C8F24C" stroke-width="1.5"/><path d="M6.5 15.5L10 11l3 3 4.5-6" stroke="#C8F24C" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      AI Trader
+    </a>
+    <nav class="tabs-nav" aria-label="Sections">
+      <a href="/app">Dashboard</a>
+      <a href="/profile" aria-current="page">Profile</a>
+    </nav>
+    <span class="who" id="who"></span>
+    <button class="btn btn-quiet btn-sm" id="signout" type="button">Sign out</button>
+  </div>
+</header>
+
+<main class="page">
+  <section class="call">
+    <h1 style="font-size:20px">Profile</h1>
+    <dl class="stats" id="me"></dl>
+  </section>
+
+  <section class="panel" aria-labelledby="conn-h">
+    <h2 id="conn-h">Connections</h2>
+    <p class="panel-sub">Each stage of the pipeline, checked live when this page loads.</p>
+    <div class="conn" id="conn"><p class="empty">Checking…</p></div>
+  </section>
+
+  <section class="panel" aria-labelledby="lim-h">
+    <h2 id="lim-h">Limits</h2>
+    <p class="panel-sub">Enforced in code on every order. Changing them requires a redeploy, deliberately.</p>
+    <dl class="stats" id="limits"></dl>
+  </section>
+
+  <footer class="foot"><p>Prototype software, not a brokerage and not investment advice.</p></footer>
+</main>
+
+<script>
+(function(){
+  var $=function(id){return document.getElementById(id)};
+  function esc(s){return String(s==null?"":s).replace(/[&<>"]/g,function(c){return{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]})}
+  function money(v){var n=Number(v);if(!isFinite(n))n=0;return "$"+n.toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2})}
+  async function api(u,o){var r=await fetch(u,o);var d=await r.json().catch(function(){return{}});if(!r.ok)throw new Error(d.detail||("HTTP "+r.status));return d}
+  function stat(l,v,txt){return '<div><dt>'+esc(l)+'</dt><dd'+(txt?' class="txt"':'')+'>'+esc(v)+'</dd></div>'}
+  function row(name, state, detail){
+    var cls = state==="on"?"on":(state==="warn"?"warn":"");
+    var label = state==="on"?"Connected":(state==="warn"?"Needs attention":"Not connected");
+    return '<div class="conn-row"><span class="conn-name">'+esc(name)+'</span><span class="conn-detail">'+esc(detail)+'</span><span class="pill '+cls+'"><i></i>'+label+'</span></div>';
+  }
+
+  async function boot(){
+    var me;
+    try{ me=await api("/api/auth/me"); }catch(e){ location.href="/login"; return; }
+    if(!me.authenticated){ location.href="/login"; return; }
+    var u=me.user;
+    $("who").textContent=u.email;
+    $("me").innerHTML = stat("Email", u.email, true) +
+      stat("Account type", u.is_demo ? "Demo session" : "Member", true) +
+      stat("Member since", u.created_at ? new Date(u.created_at*1000).toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"}) : "—", true) +
+      stat("User id", u.user_id, true);
+    $("signout").onclick=async function(){ try{await api("/api/auth/logout",{method:"POST"})}catch(e){} location.href="/login"; };
+
+    var cfg={}, cap={};
+    try{ cfg=await api("/api/config"); cap=cfg.capabilities||{}; }catch(e){}
+    var rows=[];
+
+    try{
+      var b=await api("/api/broker/status");
+      if(!b.configured) rows.push(row("Broker", "off", "Add Alpaca paper keys to place orders. Approvals return blocked until then."));
+      else if(!b.connected) rows.push(row("Broker", "warn", "Alpaca keys are set but the check failed: "+b.message));
+      else rows.push(row("Broker", b.trading_blocked?"warn":"on",
+        "Alpaca "+b.mode+" · buying power "+money(b.buying_power)+" · market "+(b.market_open?"open":"closed")));
+    }catch(e){ rows.push(row("Broker","warn","Could not check the broker.")); }
+
+    var prov=cap.research_providers||[];
+    rows.push(row("Research", prov.length?"on":"off", prov.length ? "Live news from "+prov.join(" and ")+", clustered into claims." : "Add a Tavily or Parallel key. Without it, no call can be made."));
+    rows.push(row("Ranking model", cap.ranking_model?"on":"off", cap.ranking_model ? cap.ranking_model+" ranks candidates and must cite its evidence." : "Add an Anthropic key. Without it, research is shown but never turned into a call."));
+
+    try{
+      var t=await api("/api/telegram/status");
+      if(!t.configured) rows.push(row("Telegram","off","Add a bot token and your chat id to get cards on your phone."));
+      else rows.push(row("Telegram", t.webhook_url?"on":"warn", t.webhook_url ? "Cards delivered via @"+(t.bot||"bot")+"." : "Bot reachable, but the webhook is not registered, so taps will not arrive."));
+    }catch(e){ rows.push(row("Telegram","warn","Could not check Telegram.")); }
+
+    rows.push(row("Storage", cfg.storage_backend==="postgres"?"on":"warn",
+      cfg.storage_backend==="postgres" ? "Postgres. Accounts and history persist." : "File storage. Data resets when the server restarts."));
+    $("conn").innerHTML=rows.join("");
+
+    var pol=cfg.portfolio_policy||{};
+    $("limits").innerHTML = stat("Max order", money(cfg.max_budget_usd)) + stat("Cash reserve", money(pol.cash_reserve_usd)) +
+      stat("Max positions", String(pol.max_positions||"—")) + stat("Instruments", "Long-only US equities", true);
+  }
+  boot();
+})();
+</script>
+</body>
+</html>

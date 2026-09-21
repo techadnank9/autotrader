@@ -10,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from ai_trader.accounts import AccountError, SessionSigner, UserStore, demo_user
+from ai_trader.brokers import BrokerError, build_broker
 from ai_trader.config import Settings
 from ai_trader.decisions import Decision, DecisionClosed, DecisionService, DecisionStore
 from ai_trader.engine import AnalysisRequest, DEFAULT_UNIVERSE, RecommendationEngine, SourceWeights
@@ -29,8 +30,19 @@ sia_service = SIAService(settings)
 telegram = TelegramClient(settings)
 
 
+broker = build_broker(settings)
+
+
 def _execute_decision(decision: Decision) -> dict[str, Any]:
-    """The only path from an approved decision to a real order."""
+    """The only path from an approved decision to a real order.
+
+    The decision id doubles as the broker's client_order_id, so even a duplicated
+    call cannot create a second order.
+    """
+    if broker.configured:
+        return broker.place_notional_buy(
+            decision.symbol, Decimal(decision.amount_usd), client_order_id=decision.decision_id
+        )
     return engine.trade(
         {"symbol": decision.symbol, "dollar_amount": decision.amount_usd},
         execute=True,
@@ -141,6 +153,13 @@ def dashboard(aitrader_session: str | None = Cookie(default=None)):
     return FileResponse(STATIC_DIR / "dashboard.html")
 
 
+@app.get("/profile")
+def profile_page(aitrader_session: str | None = Cookie(default=None)):
+    if _current_user(aitrader_session) is None:
+        return RedirectResponse("/login", status_code=303)
+    return FileResponse(STATIC_DIR / "profile.html")
+
+
 @app.get("/legacy")
 def legacy_dashboard() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
@@ -167,6 +186,13 @@ def config() -> dict[str, Any]:
         "portfolio_candidate_pool_size": settings.portfolio_candidate_pool_size,
         "active_portfolio_agent": portfolio_engine.registry.list_agents()["current"],
         "storage_backend": STORAGE_BACKEND,
+        "capabilities": {
+            "research_providers": engine.research.providers,
+            "ranking_model": "claude-opus-5" if engine.ranker.enabled else None,
+            "broker": broker.name,
+            "broker_mode": ("live" if settings.alpaca_live else "paper") if broker.configured else None,
+            "telegram": telegram.configured,
+        },
         "sia": sia_service.status(),
     }
 
@@ -217,6 +243,19 @@ def manage_portfolio(payload: ManagePortfolioPayload) -> dict[str, Any]:
 
 @app.get("/api/portfolio-snapshot")
 def portfolio_snapshot() -> dict[str, Any]:
+    if broker.configured:
+        try:
+            snapshot = {
+                "agentic_account": {"account_number_masked": None},
+                "portfolio": broker.account(),
+                "positions": broker.positions(),
+                "warnings": [],
+                "source": broker.name,
+            }
+            snapshot["agentic_account"]["account_number_masked"] = snapshot["portfolio"].get("account_number_masked")
+        except BrokerError as exc:
+            snapshot = {"portfolio": {}, "positions": [], "warnings": [str(exc)], "source": broker.name}
+        return {"account_snapshot": snapshot, "meta": {"active_agent": portfolio_engine.registry.list_agents()["current"]}}
     universe = DEFAULT_UNIVERSE[: settings.portfolio_candidate_pool_size]
     snapshot = trader.fetch_portfolio_snapshot(universe)
     return {
@@ -466,3 +505,28 @@ def auth_demo(response: Response) -> dict[str, Any]:
 def auth_logout(response: Response) -> dict[str, Any]:
     response.delete_cookie(SESSION_COOKIE, path="/")
     return {"ok": True}
+
+
+@app.get("/api/broker/status")
+def broker_status() -> dict[str, Any]:
+    return broker.status()
+
+
+@app.get("/api/portfolio/history")
+def portfolio_history(period: str = "1M", aitrader_session: str | None = Cookie(default=None)) -> dict[str, Any]:
+    _require_user(aitrader_session)
+    if period not in {"1D", "1W", "1M", "3M", "1A"}:
+        raise HTTPException(status_code=400, detail="period must be one of 1D, 1W, 1M, 3M, 1A")
+    try:
+        return broker.portfolio_history(period)
+    except BrokerError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.get("/api/orders")
+def list_orders(aitrader_session: str | None = Cookie(default=None)) -> dict[str, Any]:
+    _require_user(aitrader_session)
+    try:
+        return {"broker": broker.name, "orders": broker.recent_orders()}
+    except BrokerError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc

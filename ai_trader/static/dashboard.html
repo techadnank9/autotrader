@@ -18,6 +18,10 @@
       <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="1.5" y="1.5" width="21" height="21" rx="6.5" stroke="#C8F24C" stroke-width="1.5"/><path d="M6.5 15.5L10 11l3 3 4.5-6" stroke="#C8F24C" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
       AI Trader
     </a>
+    <nav class="tabs-nav" aria-label="Sections">
+      <a href="/app" aria-current="page">Dashboard</a>
+      <a href="/profile">Profile</a>
+    </nav>
     <span class="who" id="who"></span>
     <button class="btn btn-quiet btn-sm" id="signout" type="button">Sign out</button>
   </div>
@@ -47,6 +51,36 @@
       <dl class="stats" id="stats"></dl>
       <div class="holdings" id="holdings"></div>
     </section>
+  </section>
+
+
+  <section class="panel" aria-labelledby="perf-h">
+    <div class="panel-head">
+      <div>
+        <h2 id="perf-h">Account value</h2>
+        <p class="panel-sub" id="perf-sub">From your broker's portfolio history.</p>
+      </div>
+      <div class="seg" role="group" aria-label="Time range" id="periods">
+        <button type="button" data-p="1W">1W</button>
+        <button type="button" data-p="1M" aria-pressed="true">1M</button>
+        <button type="button" data-p="3M">3M</button>
+        <button type="button" data-p="1A">1Y</button>
+      </div>
+    </div>
+    <div class="chart-wrap" id="chart"><p class="empty">Loading…</p></div>
+    <details class="table-view"><summary>Show as table</summary><div id="chart-table"></div></details>
+  </section>
+
+  <section class="panel" aria-labelledby="out-h">
+    <h2 id="out-h">Your calls</h2>
+    <p class="panel-sub">What was proposed, and what you did with it.</p>
+    <dl class="tiles" id="tiles"></dl>
+  </section>
+
+  <section class="panel" aria-labelledby="trades-h">
+    <h2 id="trades-h">Trades placed</h2>
+    <p class="panel-sub">Orders your approvals sent to the broker.</p>
+    <div id="trades"><p class="empty">Loading…</p></div>
   </section>
 
   <section class="panel" aria-labelledby="hist-h">

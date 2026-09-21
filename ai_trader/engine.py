@@ -259,12 +259,14 @@ Return valid JSON only:
         ]
         return {
             "pool": pool,
+            # No research ran, so there is no basis for a trade. Proposing one here
+            # would put a real order behind reasoning that does not exist.
             "recommendation": {
-                "decision": "buy" if pool else "no_trade",
-                "symbol": pool[0]["symbol"] if pool else None,
-                "dollar_amount": float(request_model.budget),
-                "confidence": 0.58,
-                "rationale": "Fallback recommendation generated because the Codex analysis call did not complete cleanly.",
+                "decision": "no_trade",
+                "symbol": None,
+                "dollar_amount": 0.0,
+                "confidence": 0.0,
+                "rationale": "No research ran, so there is nothing to base a call on. Configure a research provider and a ranking model.",
                 "risks": ["Validate tradability and quote context before any live order.", stderr[:180] if stderr else "No stderr."],
             },
             "source_summary": {
@@ -292,20 +294,129 @@ class RecommendationEngine:
         self.settings = settings
         self.bright_data = BrightDataClient(settings)
         self.llm = CodexLLM(settings)
+        from ai_trader.ranker import ClaudeRanker
+        from ai_trader.research import ResearchService
+
+        self.research = ResearchService(settings)
+        self.ranker = ClaudeRanker(settings)
 
     def analyze(self, request_model: AnalysisRequest) -> dict[str, Any]:
         pool = DEFAULT_UNIVERSE[: request_model.pool_size]
+        if self.research.enabled:
+            return self._analyze_live(request_model, pool)
+
         context = self.bright_data.collect(pool)
         result = self.llm.recommend(request_model, context)
         result = self._normalize_allocations(result, request_model)
         result["meta"] = {
             "bright_data_mode": context.get("mode", "bright_data"),
+            "research_mode": "demo",
+            "ranking_mode": "codex_or_fallback",
             "budget": money_string(request_model.budget),
             "pool_size": request_model.pool_size,
             "trade_default": "no_op",
         }
         result["reasoning_trace"] = self._build_reasoning_trace(request_model, context, result)
         return result
+
+    def _analyze_live(self, request_model: AnalysisRequest, pool: list[str]) -> dict[str, Any]:
+        from ai_trader.ranker import RankerError
+
+        research = self.research.collect(pool)
+        weights = request_model.weights.normalized()
+        ranking_note = None
+
+        if research["claim_count"] == 0:
+            result = self._no_trade(pool, "Research returned no news for any candidate.")
+            ranking_mode = "no_evidence"
+        elif self.ranker.enabled:
+            try:
+                result = self.ranker.rank(
+                    research, weights={"reddit": weights.reddit, "x": weights.x, "realtime": weights.realtime}
+                )
+                ranking_mode = "claude"
+            except RankerError as exc:
+                ranking_note = str(exc)
+                result = self._evidence_only(research, pool, ranking_note)
+                ranking_mode = "evidence_only"
+        else:
+            ranking_note = "No ranking model configured, so no call can be made."
+            result = self._evidence_only(research, pool, ranking_note)
+            ranking_mode = "evidence_only"
+
+        # Sizing happens here, in code, never in the model.
+        rec = result["recommendation"]
+        if rec.get("decision") == "buy" and rec.get("symbol"):
+            rec["dollar_amount"] = float(min(request_model.budget, self.settings.max_budget_usd))
+        else:
+            rec["dollar_amount"] = 0.0
+
+        result = self._normalize_allocations(result, request_model)
+        result["research"] = research
+        result["meta"] = {
+            "bright_data_mode": "live",
+            "research_mode": "live",
+            "providers": research["providers"],
+            "ranking_mode": ranking_mode,
+            "ranking_note": ranking_note,
+            "budget": money_string(request_model.budget),
+            "pool_size": request_model.pool_size,
+            "trade_default": "no_op",
+        }
+        result["reasoning_trace"] = self._live_trace(research, result, ranking_mode, ranking_note)
+        return result
+
+    @staticmethod
+    def _no_trade(pool: list[str], why: str) -> dict[str, Any]:
+        return {
+            "pool": [{"symbol": s, "score": 0.0, "reason": why, "claim_ids": []} for s in pool],
+            "recommendation": {"decision": "no_trade", "symbol": None, "confidence": 0.0,
+                               "rationale": why, "risks": []},
+        }
+
+    @staticmethod
+    def _evidence_only(research: dict[str, Any], pool: list[str], why: str) -> dict[str, Any]:
+        """Rank by corroboration only, and never recommend a buy from it.
+
+        More news is not bullish news, so volume alone cannot justify a trade.
+        """
+        claims = research.get("claims") or {}
+        rows = []
+        for symbol in pool:
+            cs = claims.get(symbol) or []
+            corroborated = sum(c["independent_sources"] for c in cs)
+            rows.append({
+                "symbol": symbol,
+                "score": round(min(corroborated / 12.0, 1.0), 4),
+                "reason": f"{len(cs)} distinct claim(s) from {corroborated} independent source(s). Unranked: {why}",
+                "claim_ids": [c["claim_id"] for c in cs][:5],
+            })
+        rows.sort(key=lambda r: r["score"], reverse=True)
+        return {
+            "pool": rows,
+            "recommendation": {"decision": "no_trade", "symbol": None, "confidence": 0.0,
+                               "rationale": why, "risks": []},
+        }
+
+    @staticmethod
+    def _live_trace(research: dict[str, Any], result: dict[str, Any], mode: str, note: str | None) -> list[dict[str, str]]:
+        rec = result.get("recommendation") or {}
+        top = ", ".join(f"{p['symbol']} {p['score']:.2f}" for p in (result.get("pool") or [])[:3]) or "none"
+        errors = research.get("errors") or []
+        return [
+            {"stage": "research", "title": "Live news pulled",
+             "detail": f"{research['raw_hits']} articles from {', '.join(research['providers'])}"
+                       + (f"; {len(errors)} request(s) failed." if errors else ".")},
+            {"stage": "dedupe", "title": "Collapsed into claims",
+             "detail": f"{research['raw_hits']} articles became {research['claim_count']} distinct claims. "
+                       "Syndicated copies of one story count once."},
+            {"stage": "ranking", "title": "Ranked" if mode == "claude" else "Not ranked",
+             "detail": (f"Claude scored the candidates: {top}." if mode == "claude"
+                        else (note or "Ranking skipped."))},
+            {"stage": "decision", "title": "Recommendation",
+             "detail": (f"Buy {rec.get('symbol')} at confidence {rec.get('confidence', 0):.2f}. {rec.get('rationale', '')}"
+                        if rec.get("decision") == "buy" else f"No trade. {rec.get('rationale', '')}")},
+        ]
 
     def _build_reasoning_trace(
         self,

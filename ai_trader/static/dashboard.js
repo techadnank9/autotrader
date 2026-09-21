@@ -190,6 +190,7 @@
       if (open.length && !state.decision) renderCall(open[0]);
       else if (!open.length && !state.decision) renderCall(null);
 
+      renderTiles(recent);
       var answered = recent.filter(function (d) { return d.status !== "pending"; });
       $("history").innerHTML = answered.length
         ? '<div class="hist">' + answered.map(function (d) {
@@ -222,12 +223,193 @@
     } catch (err) { $("rails").innerHTML = ""; }
 
     try {
+      var c2 = (await api("/api/config")).capabilities || {};
+      var parts = [
+        "Research: " + (c2.research_providers && c2.research_providers.length ? c2.research_providers.join(" + ") : "not connected"),
+        "Ranking: " + (c2.ranking_model || "not connected"),
+        "Broker: " + (c2.broker && c2.broker !== "none" ? c2.broker + " (" + c2.broker_mode + ")" : "not connected")
+      ];
+      $("delivery").insertAdjacentHTML("beforebegin", '<p class="delivery">' + esc(parts.join(" · ")) + '</p>');
+    } catch (e) {}
+    try {
       var tg = await api("/api/telegram/status");
       $("delivery").textContent = tg.configured
         ? "Decision cards are delivered to Telegram" + (tg.bot ? " via @" + tg.bot : "") + "."
         : "Telegram delivery is not configured, so calls appear here only.";
     } catch (err) {
       $("delivery").textContent = "Telegram delivery status unavailable.";
+    }
+  }
+
+
+  /* ---------- account value chart ---------- */
+
+  var period = "1M";
+  var NS = "http://www.w3.org/2000/svg";
+  function el(tag, attrs) {
+    var n = document.createElementNS(NS, tag);
+    for (var k in attrs) n.setAttribute(k, attrs[k]);
+    return n;
+  }
+  function fmtDay(ts) {
+    var d = new Date(ts * 1000);
+    return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  }
+
+  function renderEquity(data) {
+    var wrap = $("chart");
+    var pts = (data.points || []).filter(function (p) { return p.equity != null; });
+    if (pts.length < 2) {
+      wrap.innerHTML = '<p class="empty">Not enough history yet. The curve fills in as your account trades.</p>';
+      $("chart-table").innerHTML = "";
+      return;
+    }
+
+    var first = pts[0].equity, last = pts[pts.length - 1].equity;
+    var chg = last - first, pct = first ? chg / first : 0;
+    var sign = chg >= 0 ? "+" : "−";
+
+    wrap.innerHTML =
+      '<div class="headline"><span class="big">' + money(last) + '</span>' +
+      '<span class="chg">' + sign + money(Math.abs(chg)).slice(1) + " (" + sign + Math.abs(pct * 100).toFixed(2) + '%) this period</span></div>';
+
+    var W = Math.max(wrap.clientWidth, 320), H = 260;
+    var ys = pts.map(function (p) { return p.equity; });
+    var lo = Math.min.apply(null, ys), hi = Math.max.apply(null, ys);
+    var pad = (hi - lo) * 0.12 || Math.max(hi * 0.01, 1);
+    lo -= pad; hi += pad;
+
+    // Size the left gutter from the widest tick label, so large balances never clip.
+    var widest = Math.max(money(lo).length, money(hi).length);
+    var M = { t: 16, r: 18, b: 26, l: Math.max(56, Math.round(widest * 6.9) + 16) };
+    var iw = W - M.l - M.r, ih = H - M.t - M.b;
+
+    var x = function (i) { return M.l + (i / (pts.length - 1)) * iw; };
+    var y = function (v) { return M.t + (1 - (v - lo) / (hi - lo)) * ih; };
+
+    var svg = el("svg", { viewBox: "0 0 " + W + " " + H, role: "img",
+      "aria-label": "Account value over " + period + ", from " + money(first) + " to " + money(last) });
+
+    for (var g = 0; g <= 3; g++) {
+      var gv = lo + (hi - lo) * (g / 3), gy = y(gv);
+      svg.appendChild(el("line", { x1: M.l, x2: W - M.r, y1: gy, y2: gy, stroke: "#242A33", "stroke-width": 1 }));
+      var t = el("text", { x: M.l - 10, y: gy + 4, "text-anchor": "end", class: "axis" });
+      t.textContent = money(gv);
+      svg.appendChild(t);
+    }
+    [0, Math.floor((pts.length - 1) / 2), pts.length - 1].forEach(function (i, k) {
+      var t = el("text", { x: x(i), y: H - 6, class: "axis",
+        "text-anchor": k === 0 ? "start" : (k === 2 ? "end" : "middle") });
+      t.textContent = fmtDay(pts[i].t);
+      svg.appendChild(t);
+    });
+
+    var d = pts.map(function (p, i) { return (i ? "L" : "M") + x(i).toFixed(1) + " " + y(p.equity).toFixed(1); }).join(" ");
+    svg.appendChild(el("path", { d: d, fill: "none", stroke: "#C8F24C", "stroke-width": 2,
+      "stroke-linejoin": "round", "stroke-linecap": "round" }));
+    svg.appendChild(el("circle", { cx: x(pts.length - 1), cy: y(last), r: 4.5, fill: "#C8F24C",
+      stroke: "#101317", "stroke-width": 2 }));
+
+    var cross = el("line", { y1: M.t, y2: M.t + ih, stroke: "#8B95A3", "stroke-width": 1, opacity: 0 });
+    var dot = el("circle", { r: 5, fill: "#C8F24C", stroke: "#101317", "stroke-width": 2, opacity: 0 });
+    svg.appendChild(cross); svg.appendChild(dot);
+    var hit = el("rect", { x: M.l, y: M.t, width: iw, height: ih, fill: "transparent" });
+    svg.appendChild(hit);
+    wrap.appendChild(svg);
+
+    var tip = document.createElement("div");
+    tip.className = "tip"; tip.hidden = true;
+    wrap.appendChild(tip);
+
+    function show(evt) {
+      var r = svg.getBoundingClientRect();
+      var px = (evt.clientX - r.left) * (W / r.width);
+      var i = Math.round(((px - M.l) / iw) * (pts.length - 1));
+      i = Math.max(0, Math.min(pts.length - 1, i));
+      var p = pts[i], cx = x(i), cy = y(p.equity);
+      cross.setAttribute("x1", cx); cross.setAttribute("x2", cx); cross.setAttribute("opacity", 1);
+      dot.setAttribute("cx", cx); dot.setAttribute("cy", cy); dot.setAttribute("opacity", 1);
+      var delta = p.equity - first;
+      tip.innerHTML = '<b>' + money(p.equity) + '</b><span>' + fmtDay(p.t) + ' · ' +
+        (delta >= 0 ? "+" : "−") + money(Math.abs(delta)).slice(1) + '</span>';
+      tip.style.left = (cx * r.width / W) + "px";
+      tip.style.top = (svg.offsetTop + cy * r.height / H) + "px";
+      tip.hidden = false;
+    }
+    function hide() { cross.setAttribute("opacity", 0); dot.setAttribute("opacity", 0); tip.hidden = true; }
+    hit.addEventListener("mousemove", show);
+    hit.addEventListener("mouseleave", hide);
+    hit.addEventListener("touchstart", function (e) { show(e.touches[0]); }, { passive: true });
+    hit.addEventListener("touchmove", function (e) { show(e.touches[0]); }, { passive: true });
+
+    var step = Math.max(1, Math.floor(pts.length / 30));
+    var rows = pts.filter(function (_, i) { return i % step === 0 || i === pts.length - 1; });
+    $("chart-table").innerHTML = '<table><thead><tr><th>Date</th><th>Value</th></tr></thead><tbody>' +
+      rows.map(function (p) { return '<tr><td>' + fmtDay(p.t) + '</td><td>' + money(p.equity) + '</td></tr>'; }).join("") +
+      '</tbody></table>';
+  }
+
+  async function loadEquity() {
+    $("chart").innerHTML = '<p class="empty">Loading…</p>';
+    try {
+      var cfg = await api("/api/config");
+      var cap = cfg.capabilities || {};
+      if (cap.broker === "none") {
+        $("chart").innerHTML = '<p class="empty">No broker connected. Once Alpaca is connected, your account value is charted here.</p>';
+        $("perf-sub").textContent = "Connect a broker to see your real account value.";
+        return;
+      }
+      $("perf-sub").textContent = "From your " + cap.broker + " " + (cap.broker_mode || "") + " account.";
+      renderEquity(await api("/api/portfolio/history?period=" + period));
+    } catch (err) {
+      $("chart").innerHTML = '<p class="empty">Could not load account history: ' + esc(err.message) + '</p>';
+    }
+  }
+
+  function bindPeriods() {
+    Array.prototype.forEach.call(document.querySelectorAll("#periods button"), function (b) {
+      b.onclick = function () {
+        period = b.dataset.p;
+        Array.prototype.forEach.call(document.querySelectorAll("#periods button"), function (o) {
+          o.setAttribute("aria-pressed", String(o === b));
+        });
+        loadEquity();
+      };
+    });
+    var t; window.addEventListener("resize", function () { clearTimeout(t); t = setTimeout(loadEquity, 200); });
+  }
+
+  /* ---------- calls + trades ---------- */
+
+  function renderTiles(decisions) {
+    var count = function (st) { return decisions.filter(function (d) { return d.status === st; }).length; };
+    $("tiles").innerHTML =
+      tile("Calls proposed", decisions.length) + tile("Approved", count("approved")) +
+      tile("Skipped", count("skipped")) + tile("Expired", count("expired"));
+  }
+  function tile(label, n) { return '<div><dt>' + esc(label) + '</dt><dd>' + n + '</dd></div>'; }
+
+  async function loadTrades() {
+    try {
+      var data = await api("/api/orders");
+      var orders = data.orders || [];
+      if (data.broker === "none") {
+        $("trades").innerHTML = '<p class="empty">No broker connected yet, so no orders have been placed.</p>';
+        return;
+      }
+      $("trades").innerHTML = orders.length
+        ? '<div class="trade-list">' + orders.map(function (o) {
+            var price = o.filled_avg_price ? money(o.filled_avg_price) : "—";
+            return '<div class="trade-row">' +
+              '<span class="d">' + esc((o.submitted_at || "").slice(0, 10)) + '</span>' +
+              '<span class="m"><b>' + esc(o.symbol) + '</b></span>' +
+              '<span class="m">' + esc(o.side) + ' ' + (o.notional ? money(o.notional) : esc(o.filled_qty || "")) + '</span>' +
+              '<span class="tag ' + (o.status === "filled" ? "ok" : (/cancel|reject|expire/.test(o.status) ? "no" : "")) + '">' + esc(o.status) + '</span>' +
+              '<span class="m" style="text-align:right">' + price + '</span></div>';
+          }).join("") + '</div>'
+        : '<p class="empty">No orders yet. Approve a call to place your first one.</p>';
+    } catch (err) {
+      $("trades").innerHTML = '<p class="empty">Could not load orders: ' + esc(err.message) + '</p>';
     }
   }
 
@@ -247,9 +429,12 @@
     };
     $("run").onclick = runResearch;
 
+    bindPeriods();
     loadHistory();
     loadAccount();
     loadLimits();
+    loadEquity();
+    loadTrades();
   }
 
   boot();
