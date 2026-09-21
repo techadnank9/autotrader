@@ -8,6 +8,7 @@ from typing import Any
 from fastapi import Cookie, FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
 from ai_trader.accounts import AccountError, SessionSigner, UserStore, demo_user
@@ -19,7 +20,8 @@ from ai_trader.engine import AnalysisRequest, DEFAULT_UNIVERSE, RecommendationEn
 from ai_trader.portfolio_engine import ManagePortfolioRequest, PortfolioManagementEngine
 from ai_trader.robinhood import RobinhoodTrader
 from ai_trader.sia import SIAService
-from ai_trader.telegram import TelegramClient, parse_callback
+from ai_trader.telegram import TelegramClient
+from ai_trader import alerts
 from ai_trader import google_oauth
 from ai_trader import robinhood_mcp as rh
 from ai_trader.picks import FilePicksStore, PicksService
@@ -75,14 +77,16 @@ def _build_stores():
 
             database = Database(settings.database_url)
             return (PostgresUserStore(database), PostgresDecisionStore(database),
-                    PostgresCredentialStore(database, cipher), PostgresPicksStore(database), "postgres")
+                    PostgresCredentialStore(database, cipher), PostgresPicksStore(database),
+                    alerts.PostgresLinkStore(database), "postgres")
         except Exception as exc:  # a broken DSN must not take the whole app down
             print(f"Postgres unavailable, falling back to file stores: {exc}")
     return (UserStore(settings.account_dir), DecisionStore(settings.decision_dir),
-            FileCredentialStore(settings.account_dir, cipher), FilePicksStore(settings.replay_log_dir), "files")
+            FileCredentialStore(settings.account_dir, cipher), FilePicksStore(settings.replay_log_dir),
+            alerts.FileLinkStore(settings.account_dir), "files")
 
 
-users, decision_store, credential_store, picks_store, STORAGE_BACKEND = _build_stores()
+users, decision_store, credential_store, picks_store, tg_links, STORAGE_BACKEND = _build_stores()
 picks = PicksService(engine, picks_store, ttl_hours=settings.picks_ttl_hours,
                      budget=min(settings.default_budget_usd, settings.max_budget_usd))
 decisions = DecisionService(decision_store, executor=_execute_decision)
@@ -236,6 +240,13 @@ def portfolio_page(aitrader_session: str | None = Cookie(default=None)):
     if _needs_broker(user):
         return RedirectResponse("/connect", status_code=303)
     return FileResponse(STATIC_DIR / "portfolio.html")
+
+
+@app.get("/alerts")
+def alerts_page(aitrader_session: str | None = Cookie(default=None)):
+    if _current_user(aitrader_session) is None:
+        return RedirectResponse("/login", status_code=303)
+    return FileResponse(STATIC_DIR / "alerts.html")
 
 
 @app.get("/stock/{symbol}")
@@ -429,9 +440,6 @@ def answer_decision(
     return {"decision": decision.to_dict()}
 
 
-@app.get("/api/telegram/status")
-def telegram_status() -> dict[str, Any]:
-    return telegram.status()
 
 
 @app.get("/api/decisions")
@@ -492,51 +500,273 @@ def propose_decision(
     return {"status": "proposed", "decision": decision.to_dict(), "delivery": delivery}
 
 
+def _base_url(request: Request | None = None) -> str:
+    return (settings.public_base_url or (str(request.base_url) if request else "")).rstrip("/")
+
+
+def _notify(user_id: str, kind: str, text: str, rows: list | None = None) -> None:
+    """Best effort: an alert must never break the action that triggered it."""
+    if not telegram.configured:
+        return
+    try:
+        link = tg_links.get(user_id)
+        if link and link["prefs"].get(kind, True):
+            telegram.send(link["chat_id"], text, rows)
+    except Exception as exc:  # noqa: BLE001
+        print(f"telegram notify failed: {type(exc).__name__}")
+
+
+def _send_digest(link: dict[str, Any], run: dict[str, Any]) -> dict[str, Any]:
+    text, rows = alerts.picks_digest(run, _base_url(), settings.default_budget_usd)
+    return telegram.send(link["chat_id"], text, rows)
+
+
+def _broadcast_picks(run: dict[str, Any]) -> int:
+    if not telegram.configured or run.get("status") != "ok":
+        return 0
+    sent = 0
+    for link in tg_links.all():
+        if link["prefs"].get("picks", True) and _send_digest(link, run).get("ok"):
+            sent += 1
+    return sent
+
+
+class TelegramPrefs(BaseModel):
+    picks: bool | None = None
+    orders: bool | None = None
+
+
+def _tg_view(user) -> dict[str, Any]:
+    link = tg_links.get(user.user_id)
+    return {
+        "available": telegram.configured and not user.is_demo,
+        "is_demo": user.is_demo,
+        "connected": bool(link),
+        "username": (link or {}).get("username"),
+        "name": (link or {}).get("name"),
+        "linked_at": (link or {}).get("linked_at"),
+        "prefs": (link or {}).get("prefs") or dict(alerts.DEFAULT_PREFS),
+        "bot": telegram.bot_username() if telegram.configured else None,
+    }
+
+
+@app.get("/api/telegram")
+def telegram_me(aitrader_session: str | None = Cookie(default=None)) -> dict[str, Any]:
+    return _tg_view(_require_user(aitrader_session))
+
+
+@app.post("/api/telegram/link")
+def telegram_link(request: Request, aitrader_session: str | None = Cookie(default=None)) -> dict[str, Any]:
+    """A one-time link that binds whichever Telegram chat opens it to this account."""
+    user = _require_user(aitrader_session)
+    if user.is_demo:
+        raise HTTPException(status_code=403, detail="Create an account to get alerts.")
+    if not telegram.configured:
+        raise HTTPException(status_code=503, detail="Telegram alerts aren't available right now.")
+    telegram.ensure_setup(f"{_base_url(request)}/api/telegram/webhook", alerts.webhook_secret(settings))
+    bot = telegram.bot_username()
+    if not bot:
+        raise HTTPException(status_code=503, detail="Telegram isn't reachable right now. Try again in a minute.")
+    code = alerts.make_link_code(settings.session_secret, user.user_id)
+    url = f"https://t.me/{bot}?start={code}"
+    qr = None
+    try:
+        import segno
+        qr = segno.make(url, error="m").svg_inline(scale=5, border=2, dark="#08090B", light="#FFFFFF")
+    except Exception:  # noqa: BLE001  the link alone still works
+        pass
+    return {"url": url, "bot": bot, "qr_svg": qr, "expires_in": alerts.LINK_TTL_SECONDS}
+
+
+@app.patch("/api/telegram/prefs")
+def telegram_prefs(payload: TelegramPrefs, aitrader_session: str | None = Cookie(default=None)) -> dict[str, Any]:
+    user = _require_user(aitrader_session)
+    changes = {k: v for k, v in payload.model_dump().items() if v is not None}
+    if not tg_links.set_prefs(user.user_id, changes):
+        raise HTTPException(status_code=404, detail="Telegram isn't connected.")
+    return _tg_view(user)
+
+
+@app.post("/api/telegram/test")
+def telegram_test(aitrader_session: str | None = Cookie(default=None)) -> dict[str, Any]:
+    user = _require_user(aitrader_session)
+    link = tg_links.get(user.user_id)
+    if not link:
+        raise HTTPException(status_code=404, detail="Telegram isn't connected.")
+    run = picks_store.latest()
+    r = _send_digest(link, run) if run and run.get("status") == "ok" else telegram.send(
+        link["chat_id"], "✅ <b>Alerts are working.</b>\nToday's picks will arrive here each weekday morning.")
+    if not r.get("ok"):
+        raise HTTPException(status_code=502, detail="Telegram didn't accept the message. If you blocked the bot, "
+                                                    "unblock it or connect again.")
+    return {"sent": True}
+
+
+@app.delete("/api/telegram/link")
+def telegram_unlink(aitrader_session: str | None = Cookie(default=None)) -> dict[str, Any]:
+    user = _require_user(aitrader_session)
+    link = tg_links.get(user.user_id)
+    removed = tg_links.unlink(user.user_id)
+    if link and telegram.configured:
+        telegram.send(link["chat_id"], "Disconnected from AI Trader. You won't get alerts here anymore.")
+    return {"disconnected": removed}
+
+
+def _tg_reply(chat_id: Any, text: str) -> None:
+    telegram.send(chat_id, text)
+
+
+def _tg_message(msg: dict[str, Any]) -> None:
+    chat = msg.get("chat") or {}
+    if chat.get("type") != "private":
+        return
+    chat_id, sender = chat.get("id"), msg.get("from") or {}
+    text = (msg.get("text") or "").strip()
+    cmd, _, arg = text.partition(" ")
+    cmd = cmd.split("@")[0].lower()
+    link = tg_links.by_chat(str(chat_id))
+    connect = f"To connect, open {_base_url()}/alerts and tap <b>Connect Telegram</b>."
+
+    if cmd == "/start" and arg.strip():
+        uid = alerts.read_link_code(settings.session_secret, arg.strip())
+        user = users.get(uid) if uid else None
+        if not user or user.is_demo:
+            _tg_reply(chat_id, "That link has expired. Open the Alerts page in the app and tap "
+                               "<b>Connect Telegram</b> again.")
+            return
+        tg_links.link(user.user_id, str(chat_id), sender.get("username"), sender.get("first_name"))
+        _tg_reply(chat_id, "✅ <b>Connected to AI Trader</b>\n\n"
+                           "You'll get today's picks each weekday around 9 AM ET, with a Buy button, and a "
+                           "message whenever one of your orders is placed or canceled.\n\n"
+                           "Send /picks any time for today's picks. Send /stop to disconnect.")
+        return
+    if cmd == "/picks":
+        if not link:
+            _tg_reply(chat_id, connect)
+            return
+        run = picks_store.latest()
+        if run and run.get("status") == "ok":
+            _send_digest(link, run)
+        else:
+            _tg_reply(chat_id, "Today's picks aren't ready yet. They arrive each weekday around 9 AM ET.")
+        return
+    if cmd == "/stop":
+        if link:
+            tg_links.unlink(link["user_id"])
+            _tg_reply(chat_id, f"Disconnected. You won't get alerts here anymore. Reconnect any time at "
+                               f"{_base_url()}/alerts.")
+        else:
+            _tg_reply(chat_id, "This chat isn't connected to an account.")
+        return
+    if link:
+        _tg_reply(chat_id, "You're connected. Today's picks arrive each weekday around 9 AM ET.\n"
+                           "/picks · today's picks\n/stop · disconnect")
+    else:
+        _tg_reply(chat_id, "This bot sends your AI Trader picks and order updates.\n\n" + connect)
+
+
+def _tg_callback(cb: dict[str, Any]) -> None:
+    from time import sleep
+
+    cb_id = str(cb.get("id"))
+    msg = cb.get("message") or {}
+    chat_id, message_id = (msg.get("chat") or {}).get("id"), msg.get("message_id")
+    link = tg_links.by_chat(str((cb.get("from") or {}).get("id")))
+    if not link or str(chat_id) != link["chat_id"]:
+        telegram.answer_callback(cb_id, "This chat isn't connected to an account.", alert=True)
+        return
+    user = users.get(link["user_id"])
+    if not user:
+        telegram.answer_callback(cb_id, "Account not found.", alert=True)
+        return
+    data = str(cb.get("data") or "")
+    action, _, rest = data.partition(":")
+    amount = settings.default_budget_usd
+
+    if action == "px":
+        telegram.answer_callback(cb_id, "Canceled.")
+        telegram.edit(chat_id, message_id, "Canceled. Nothing was bought.")
+        return
+
+    run = picks_store.latest()
+    if action == "pb":
+        symbol = rest.upper()
+        pick = next((p for p in (run or {}).get("picks", []) if p["symbol"] == symbol), None)
+        if not pick:
+            telegram.answer_callback(cb_id, "This pick is out of date. Send /picks for today's.", alert=True)
+            return
+        if pick.get("verdict") != "buy":
+            telegram.answer_callback(cb_id, f"{symbol} isn't a buy today.", alert=True)
+            return
+        if _needs_broker(user):
+            telegram.answer_callback(cb_id, "Connect a broker in the app first.", alert=True)
+            return
+        try:
+            ctx = market.context(symbol)
+        except market.MarketDataError:
+            telegram.answer_callback(cb_id, "Couldn't get a price right now. Try again.", alert=True)
+            return
+        broker = _broker_for_user(user.user_id)
+        telegram.answer_callback(cb_id, "")
+        telegram.send(chat_id, alerts.confirm_text(symbol, amount, ctx["price"],
+                                                   "live" if getattr(broker, "live", False) else "paper",
+                                                   bool(ctx.get("market_open"))),
+                      [[{"text": "Cancel", "callback_data": "px"},
+                        {"text": f"Confirm buy", "callback_data": f"pc:{symbol}:{run['run_id']}"[:64]}]])
+        return
+
+    if action == "pc":
+        symbol, _, run_id = rest.partition(":")
+        telegram.answer_callback(cb_id, "Placing your order…")
+        telegram.edit(chat_id, message_id, f"Placing your order for <b>{symbol}</b>…")
+        try:
+            result = _place_order(user, BuyPickPayload(symbol=symbol, amount=str(amount), run_id=run_id))
+        except HTTPException as exc:
+            telegram.edit(chat_id, message_id, alerts.order_text("failed", symbol, str(exc.detail)))
+            return
+        ex = result.get("execution") or {}
+        if ex.get("status") != "submitted":
+            telegram.edit(chat_id, message_id, alerts.order_text("failed", symbol, ex.get("message") or "The broker declined it."))
+            return
+        text = alerts.order_text("placed", symbol, f"Buy {alerts._money(amount)}. Sent to your broker; "
+                                                         "it fills while the market is open (9:30 AM to 4 PM ET).")
+        broker = _broker_for_user(user.user_id)
+        for _ in range(3):  # market orders usually fill within a couple of seconds
+            sleep(1.2)
+            try:
+                o = broker.get_order(ex["order_id"])
+            except Exception:  # noqa: BLE001
+                break
+            if o.get("status") == "filled":
+                text = alerts.order_text("filled", symbol, f"Bought {o.get('filled_qty')} shares at "
+                                                           f"${float(o.get('filled_avg_price') or 0):,.2f}.")
+                break
+        telegram.edit(chat_id, message_id, text,
+                      [[{"text": "View in the app", "url": f"{_base_url()}/stock/{symbol}"}]])
+        return
+
+    telegram.answer_callback(cb_id, "")
+
+
 @app.post("/api/telegram/webhook")
 async def telegram_webhook(
     request: Request,
     x_telegram_bot_api_secret_token: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    """Telegram callback handler.
-
-    Two independent checks guard this: the shared secret proves the request came
-    from Telegram, and the responder id proves it came from the account that owns
-    the account being traded.
-    """
-    secret = settings.telegram_webhook_secret
-    if not secret or x_telegram_bot_api_secret_token != secret:
+    """Messages and button presses from the bot. The secret header proves the request
+    came from Telegram; the chat id decides whose account it acts on."""
+    if not telegram.configured or x_telegram_bot_api_secret_token != alerts.webhook_secret(settings):
         raise HTTPException(status_code=401, detail="Bad webhook secret.")
-
-    update = await request.json()
-    callback = (update or {}).get("callback_query")
-    if not isinstance(callback, dict):
-        return {"ok": True, "ignored": "not a callback_query"}
-
-    responder = str(((callback.get("from") or {}).get("id")) or "")
-    if not settings.telegram_chat_id or responder != str(settings.telegram_chat_id):
-        telegram.answer_callback(str(callback.get("id")), "This account cannot answer.", alert=True)
-        return {"ok": True, "rejected": "unauthorized responder"}
-
-    parsed = parse_callback(callback.get("data") or "")
-    if parsed is None:
-        return {"ok": True, "ignored": "unrecognized callback data"}
-    decision_id, approved = parsed
-
+    update = await request.json() or {}
     try:
-        decision = decisions.answer(decision_id, approved=approved, responder=responder)
-    except DecisionClosed as exc:
-        telegram.answer_callback(str(callback.get("id")), str(exc), alert=True)
-        return {"ok": True, "closed": str(exc)}
-
-    telegram.answer_callback(
-        str(callback.get("id")),
-        "Approved. Placing the order." if approved else "Skipped. Nothing was placed.",
-    )
-    message = callback.get("message") or {}
-    if message.get("message_id"):
-        telegram.settle_message((message.get("chat") or {}).get("id"), message.get("message_id"), decision)
-
-    return {"ok": True, "decision": decision.to_dict()}
+        # handlers do blocking I/O (and market data runs its own event loop), so off the loop they go
+        if isinstance(update.get("message"), dict):
+            await run_in_threadpool(_tg_message, update["message"])
+        elif isinstance(update.get("callback_query"), dict):
+            await run_in_threadpool(_tg_callback, update["callback_query"])
+    except Exception as exc:  # noqa: BLE001  never make Telegram retry a crash forever
+        print(f"telegram webhook error: {type(exc).__name__}: {exc}")
+    return {"ok": True}
 
 
 class CredentialsPayload(BaseModel):
@@ -1001,21 +1231,42 @@ def _place_order(user, payload: OrderPayload) -> dict[str, Any]:
 
 @app.post("/api/picks/buy")
 def buy_pick(payload: BuyPickPayload, aitrader_session: str | None = Cookie(default=None)) -> dict[str, Any]:
-    return _place_order(_require_user(aitrader_session), payload)
+    user = _require_user(aitrader_session)
+    return _order_alert(user, _place_order(user, payload), payload.symbol)
 
 
 @app.post("/api/orders")
 def place_order(payload: OrderPayload, aitrader_session: str | None = Cookie(default=None)) -> dict[str, Any]:
     """Buy any US stock, not only today's picks: the user's own call."""
-    return _place_order(_require_user(aitrader_session), payload)
+    user = _require_user(aitrader_session)
+    return _order_alert(user, _place_order(user, payload), payload.symbol)
+
+
+def _order_alert(user, result: dict[str, Any], symbol: str) -> dict[str, Any]:
+    ex, o = result.get("execution") or {}, result.get("order") or {}
+    if ex.get("status") == "submitted":
+        what = f"${float(o['notional']):,.2f}" if o.get("notional") else f"{o.get('qty')} shares"
+        at = f" at ${float(o['limit_price']):,.2f} or less" if o.get("limit_price") else ""
+        till = ", until canceled" if o.get("good_until") == "gtc" else ""
+        _notify(user.user_id, "orders", alerts.order_text("placed", symbol.upper(), f"Buy {what}{at}{till}."),
+                [[{"text": "View in the app", "url": f"{_base_url()}/stock/{symbol.upper()}"}]])
+    return result
 
 
 @app.delete("/api/orders/{order_id}")
 def cancel_order(order_id: str, aitrader_session: str | None = Cookie(default=None)) -> dict[str, Any]:
     user = _require_user(aitrader_session)
-    result = _broker_for_user(user.user_id).cancel_order(order_id)
+    broker = _broker_for_user(user.user_id)
+    result = broker.cancel_order(order_id)
     if result.get("status") != "canceled":
         raise HTTPException(status_code=409, detail=result.get("message") or "Could not cancel.")
+    try:
+        o = broker.get_order(order_id)
+        what = f"${float(o['notional']):,.2f}" if o.get("notional") else f"{o.get('qty')} shares"
+        at = f" at ${float(o['limit_price']):,.2f}" if o.get("limit_price") else ""
+        _notify(user.user_id, "orders", alerts.order_text("canceled", o.get("symbol") or "", f"Buy {what}{at}. Nothing was bought."))
+    except Exception:  # noqa: BLE001
+        pass
     return result
 
 
@@ -1150,4 +1401,4 @@ def cron_research(authorization: str | None = Header(default=None)) -> dict[str,
         raise HTTPException(status_code=401, detail="Unauthorized.")
     run = picks.run_now()
     return {"run_id": run["run_id"], "status": run["status"], "picks": len(run["picks"]),
-            "took_seconds": run.get("took_seconds")}
+            "took_seconds": run.get("took_seconds"), "alerts_sent": _broadcast_picks(run)}

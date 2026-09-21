@@ -26,9 +26,54 @@ class TelegramClient:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
 
+    _me: dict[str, Any] | None = None
+    _hooked: str | None = None
+
     @property
     def configured(self) -> bool:
-        return bool(self.settings.telegram_bot_token and self.settings.telegram_chat_id)
+        """A bot token is all that is needed: each user links their own chat."""
+        return bool(self.settings.telegram_bot_token)
+
+    def bot_username(self) -> str | None:
+        if not self.configured:
+            return None
+        if self._me is None:
+            me = self._call("getMe", {}, timeout=8)
+            if not me.get("ok"):
+                return None
+            self._me = me["result"]
+        return self._me.get("username")
+
+    def send(self, chat_id: Any, text: str, rows: list[list[dict[str, str]]] | None = None) -> dict[str, Any]:
+        payload: dict[str, Any] = {"chat_id": chat_id, "text": text, "parse_mode": "HTML",
+                                   "disable_web_page_preview": True}
+        if rows:
+            payload["reply_markup"] = {"inline_keyboard": rows}
+        return self._call("sendMessage", payload, timeout=8)
+
+    def edit(self, chat_id: Any, message_id: Any, text: str,
+             rows: list[list[dict[str, str]]] | None = None) -> dict[str, Any]:
+        payload: dict[str, Any] = {"chat_id": chat_id, "message_id": message_id, "text": text,
+                                   "parse_mode": "HTML", "disable_web_page_preview": True,
+                                   "reply_markup": {"inline_keyboard": rows or []}}
+        return self._call("editMessageText", payload, timeout=8)
+
+    def ensure_setup(self, url: str, secret: str) -> None:
+        """Point the bot at this deployment once per process, and give it its menu."""
+        if not self.configured or self._hooked == url:
+            return
+        info = self._call("getWebhookInfo", {}, timeout=8).get("result") or {}
+        if info.get("url") != url or "message" not in (info.get("allowed_updates") or []):
+            self._call("setWebhook", {"url": url, "secret_token": secret,
+                                      "allowed_updates": ["message", "callback_query"]}, timeout=8)
+            self._call("setMyCommands", {"commands": [
+                {"command": "picks", "description": "Today's picks"},
+                {"command": "stop", "description": "Stop alerts and disconnect"},
+                {"command": "help", "description": "What this bot does"}]}, timeout=8)
+            self._call("setMyDescription", {"description":
+                "Today's stock picks and your order updates from AI Trader. "
+                "Connect from the Alerts page in the app."}, timeout=8)
+        self._hooked = url
 
     def _call(self, method: str, payload: dict[str, Any], *, timeout: int = 20) -> dict[str, Any]:
         if not self.settings.telegram_bot_token:

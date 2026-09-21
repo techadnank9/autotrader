@@ -5,3 +5,4 @@ psycopg[binary]>=3.2
 anthropic>=1.7
 cryptography>=43
 openai>=1.99
+segno>=1.6

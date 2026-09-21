@@ -7,11 +7,13 @@
   var ICON = {
     picks: '<path d="M4 17l5-5 4 4 7-8" /><path d="M15 8h5v5" />',
     portfolio: '<rect x="3.5" y="7" width="17" height="12.5" rx="2.5" /><path d="M8.5 7V5.5A1.5 1.5 0 0 1 10 4h4a1.5 1.5 0 0 1 1.5 1.5V7M3.5 12.5h17" />',
+    alerts: '<path d="M6.5 16.5V11a5.5 5.5 0 0 1 11 0v5.5l1.5 2h-14z" /><path d="M10 20.5a2 2 0 0 0 4 0" />',
     profile: '<circle cx="12" cy="8.5" r="3.5" /><path d="M5 19.5c1.2-3.3 3.9-5 7-5s5.8 1.7 7 5" />',
   };
   var NAV = [
     { id: "picks", href: "/app", label: "Today's picks" },
     { id: "portfolio", href: "/portfolio", label: "Portfolio" },
+    { id: "alerts", href: "/alerts", label: "Alerts" },
     { id: "profile", href: "/profile", label: "Profile" },
   ];
   function icon(id) { return '<svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + ICON[id] + '</svg>'; }

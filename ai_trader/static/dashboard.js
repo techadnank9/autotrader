@@ -72,6 +72,7 @@
     }
     $("refresh").onclick = function () { loadPicks(true); };
     loadPicks(false); loadAccount();
+    if (!user.is_demo) api("/api/telegram").then(function (t) { $("tg-nudge").hidden = !(t.available && !t.connected); }).catch(function () {});
   }
   boot();
 })();
