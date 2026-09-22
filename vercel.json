@@ -11,9 +11,20 @@
           "maxDuration": 300
         }
       }
+    },
+    "imsg": {
+      "root": "imsg",
+      "framework": "hono",
+      "entrypoint": "src/index.ts"
     }
   },
   "rewrites": [
+    {
+      "source": "/imsg/(.*)",
+      "destination": {
+        "service": "imsg"
+      }
+    },
     {
       "source": "/(.*)",
       "destination": {

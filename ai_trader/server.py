@@ -78,15 +78,17 @@ def _build_stores():
             database = Database(settings.database_url)
             return (PostgresUserStore(database), PostgresDecisionStore(database),
                     PostgresCredentialStore(database, cipher), PostgresPicksStore(database),
-                    alerts.PostgresLinkStore(database), "postgres")
+                    alerts.PostgresLinkStore(database), alerts.PostgresLinkStore(database, "imessage_links"),
+                    "postgres")
         except Exception as exc:  # a broken DSN must not take the whole app down
             print(f"Postgres unavailable, falling back to file stores: {exc}")
     return (UserStore(settings.account_dir), DecisionStore(settings.decision_dir),
             FileCredentialStore(settings.account_dir, cipher), FilePicksStore(settings.replay_log_dir),
-            alerts.FileLinkStore(settings.account_dir), "files")
+            alerts.FileLinkStore(settings.account_dir), alerts.FileLinkStore(settings.account_dir, "imessage_links.json"),
+            "files")
 
 
-users, decision_store, credential_store, picks_store, tg_links, STORAGE_BACKEND = _build_stores()
+users, decision_store, credential_store, picks_store, tg_links, im_links, STORAGE_BACKEND = _build_stores()
 picks = PicksService(engine, picks_store, ttl_hours=settings.picks_ttl_hours,
                      budget=min(settings.default_budget_usd, settings.max_budget_usd))
 decisions = DecisionService(decision_store, executor=_execute_decision)
@@ -506,14 +508,21 @@ def _base_url(request: Request | None = None) -> str:
 
 def _notify(user_id: str, kind: str, text: str, rows: list | None = None) -> None:
     """Best effort: an alert must never break the action that triggered it."""
-    if not telegram.configured:
-        return
-    try:
-        link = tg_links.get(user_id)
-        if link and link["prefs"].get(kind, True):
-            telegram.send(link["chat_id"], text, rows)
-    except Exception as exc:  # noqa: BLE001
-        print(f"telegram notify failed: {type(exc).__name__}")
+    if telegram.configured:
+        try:
+            link = tg_links.get(user_id)
+            if link and link["prefs"].get(kind, True):
+                telegram.send(link["chat_id"], text, rows)
+        except Exception as exc:  # noqa: BLE001
+            print(f"telegram notify failed: {type(exc).__name__}")
+    if _imsg_ready():
+        try:
+            link = im_links.get(user_id)
+            if link and link["prefs"].get("verified") and link["prefs"].get(kind, True):
+                url = next((b["url"] for r in (rows or []) for b in r if b.get("url")), None)
+                _imsg_send(link["chat_id"], _plain(text) + (f"\n{url}" if url else ""))
+        except Exception as exc:  # noqa: BLE001
+            print(f"imessage notify failed: {type(exc).__name__}")
 
 
 def _send_digest(link: dict[str, Any], run: dict[str, Any]) -> dict[str, Any]:
@@ -522,12 +531,21 @@ def _send_digest(link: dict[str, Any], run: dict[str, Any]) -> dict[str, Any]:
 
 
 def _broadcast_picks(run: dict[str, Any]) -> int:
-    if not telegram.configured or run.get("status") != "ok":
+    if run.get("status") != "ok":
         return 0
     sent = 0
-    for link in tg_links.all():
-        if link["prefs"].get("picks", True) and _send_digest(link, run).get("ok"):
-            sent += 1
+    if telegram.configured:
+        for link in tg_links.all():
+            if link["prefs"].get("picks", True) and _send_digest(link, run).get("ok"):
+                sent += 1
+    if _imsg_ready():
+        for link in im_links.all():
+            if link["prefs"].get("verified") and link["prefs"].get("picks", True):
+                try:
+                    _imsg_digest(link, run)
+                    sent += 1
+                except Exception as exc:  # noqa: BLE001
+                    print(f"imessage digest failed: {type(exc).__name__}")
     return sent
 
 
@@ -767,6 +785,309 @@ async def telegram_webhook(
     except Exception as exc:  # noqa: BLE001  never make Telegram retry a crash forever
         print(f"telegram webhook error: {type(exc).__name__}: {exc}")
     return {"ok": True}
+
+
+# -- iMessage (Photon Spectrum) ----------------------------------------------------
+#
+# A small Node service in /imsg does the actual sending and receiving. This side owns
+# who is linked, what a reply means, and every order. A number is linked only after
+# the person replies YES from it, which proves the phone is theirs.
+
+import os as _os
+import re as _re
+import httpx as _httpx
+
+_SPECTRUM = "https://spectrum.photon.codes"
+
+
+def _imsg_ready() -> bool:
+    return bool(_os.environ.get("SPECTRUM_PROJECT_ID") and _os.environ.get("SPECTRUM_PROJECT_SECRET")
+                and _os.environ.get("IMSG_INTERNAL_SECRET"))
+
+
+def _plain(html_text: str) -> str:
+    import html as _html
+    return _html.unescape(_re.sub(r"<[^>]+>", "", html_text))
+
+
+def _norm_phone(raw: str) -> str | None:
+    raw = (raw or "").strip()
+    digits = _re.sub(r"\D", "", raw)
+    if raw.startswith("+") and 8 <= len(digits) <= 15:
+        return "+" + digits
+    if len(digits) == 10:
+        return "+1" + digits
+    if len(digits) == 11 and digits.startswith("1"):
+        return "+" + digits
+    return None
+
+
+def _mask(phone: str) -> str:
+    d = _re.sub(r"\D", "", phone or "")
+    return f"(•••) •••-{d[-4:]}" if len(d) >= 4 else "••••"
+
+
+def _pretty(phone: str | None) -> str | None:
+    d = _re.sub(r"\D", "", phone or "")
+    if len(d) == 11 and d.startswith("1"):
+        return f"+1 ({d[1:4]}) {d[4:7]}-{d[7:]}"
+    return phone
+
+
+def _photon(method: str, path: str, body: dict | None = None) -> dict[str, Any]:
+    pid = _os.environ["SPECTRUM_PROJECT_ID"]
+    r = _httpx.request(method, f"{_SPECTRUM}/projects/{pid}{path}", json=body, timeout=15,
+                       auth=(pid, _os.environ["SPECTRUM_PROJECT_SECRET"]))
+    try:
+        return r.json()
+    except ValueError:
+        return {"succeed": False, "status": r.status_code}
+
+
+def _photon_user(phone: str, email: str) -> dict[str, Any]:
+    """Register the number with the project so the shared line is allowed to text it."""
+    users_ = ((_photon("GET", "/users").get("data") or {}).get("users")) or []
+    hit = next((u for u in users_ if u.get("phoneNumber") == phone), None)
+    if hit:
+        return hit
+    r = _photon("POST", "/users/", {"type": "shared", "phoneNumber": phone, "email": email or None})
+    if not r.get("succeed"):
+        raise HTTPException(status_code=503, detail="Text alerts are full right now. Use Telegram for now.")
+    return r["data"]
+
+
+def _imsg_send(phone: str, text: str | None = None, poll: dict | None = None) -> None:
+    r = _httpx.post(f"{_base_url()}/imsg/send", timeout=30,
+                    headers={"x-internal-secret": _os.environ["IMSG_INTERNAL_SECRET"]},
+                    json={"phone": phone, "text": text, "poll": poll})
+    if r.status_code != 200:
+        detail = ""
+        try:
+            detail = r.json().get("error") or ""
+        except ValueError:
+            pass
+        raise RuntimeError(detail or f"send failed ({r.status_code})")
+
+
+def _imsg_digest(link: dict[str, Any], run: dict[str, Any]) -> None:
+    text, poll, syms = alerts.imessage_digest(run, _base_url(), settings.default_budget_usd)
+    im_links.set_prefs(link["user_id"], {"pending": {"run_id": run["run_id"], "symbols": syms,
+                                                     "exp": run.get("created_at", 0) + 8 * 3600} if syms else None})
+    _imsg_send(link["chat_id"], text, poll)
+
+
+def _imsg_view(user) -> dict[str, Any]:
+    link = im_links.get(user.user_id)
+    prefs = (link or {}).get("prefs") or {}
+    return {
+        "available": _imsg_ready() and not user.is_demo,
+        "is_demo": user.is_demo,
+        "connected": bool(link and prefs.get("verified")),
+        "waiting": bool(link and not prefs.get("verified")),
+        "phone": _mask(link["chat_id"]) if link else None,
+        "line": _pretty((link or {}).get("name")),
+        "prefs": {"picks": prefs.get("picks", True), "orders": prefs.get("orders", True)},
+    }
+
+
+class PhonePayload(BaseModel):
+    phone: str
+
+
+@app.get("/api/imessage")
+def imessage_me(aitrader_session: str | None = Cookie(default=None)) -> dict[str, Any]:
+    return _imsg_view(_require_user(aitrader_session))
+
+
+@app.post("/api/imessage/start")
+def imessage_start(payload: PhonePayload, aitrader_session: str | None = Cookie(default=None)) -> dict[str, Any]:
+    user = _require_user(aitrader_session)
+    if user.is_demo:
+        raise HTTPException(status_code=403, detail="Create an account to get alerts.")
+    if not _imsg_ready():
+        raise HTTPException(status_code=503, detail="Text alerts aren't available right now.")
+    phone = _norm_phone(payload.phone)
+    if not phone:
+        raise HTTPException(status_code=400, detail="Enter a mobile number, like (415) 555-0123.")
+    other = im_links.by_chat(phone)
+    if other and other["user_id"] != user.user_id and other["prefs"].get("verified"):
+        raise HTTPException(status_code=409, detail="That number is already connected to another account.")
+    pu = _photon_user(phone, user.email)
+    im_links.link(user.user_id, phone, None, pu.get("assignedPhoneNumber"))
+    im_links.set_prefs(user.user_id, {"verified": False, "pending": None})
+    try:
+        _imsg_send(phone, "AI Trader here. Reply YES to get today's picks and your order updates in iMessage. "
+                          "Reply NO if this wasn't you.")
+    except RuntimeError as exc:
+        im_links.unlink(user.user_id)
+        msg = str(exc)
+        if "not allowed" in msg.lower():
+            msg = ("We couldn't reach that number on iMessage. Check it's the number your iPhone uses for "
+                   "iMessage (Settings, Messages, Send & Receive).")
+        else:
+            msg = "We couldn't send the text. Try again in a minute."
+        raise HTTPException(status_code=502, detail=msg) from exc
+    return _imsg_view(user)
+
+
+@app.post("/api/imessage/resend")
+def imessage_resend(aitrader_session: str | None = Cookie(default=None)) -> dict[str, Any]:
+    user = _require_user(aitrader_session)
+    link = im_links.get(user.user_id)
+    if not link or link["prefs"].get("verified"):
+        raise HTTPException(status_code=409, detail="Nothing to resend.")
+    try:
+        _imsg_send(link["chat_id"], "AI Trader here. Reply YES to get today's picks and your order updates in iMessage.")
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail="We couldn't send the text. Try again in a minute.") from exc
+    return _imsg_view(user)
+
+
+@app.patch("/api/imessage/prefs")
+def imessage_prefs(payload: TelegramPrefs, aitrader_session: str | None = Cookie(default=None)) -> dict[str, Any]:
+    user = _require_user(aitrader_session)
+    changes = {k: v for k, v in payload.model_dump().items() if v is not None}
+    if not im_links.set_prefs(user.user_id, changes):
+        raise HTTPException(status_code=404, detail="Text alerts aren't connected.")
+    return _imsg_view(user)
+
+
+@app.post("/api/imessage/test")
+def imessage_test(aitrader_session: str | None = Cookie(default=None)) -> dict[str, Any]:
+    user = _require_user(aitrader_session)
+    link = im_links.get(user.user_id)
+    if not link or not link["prefs"].get("verified"):
+        raise HTTPException(status_code=404, detail="Text alerts aren't connected.")
+    run = picks_store.latest()
+    try:
+        if run and run.get("status") == "ok":
+            _imsg_digest(link, run)
+        else:
+            _imsg_send(link["chat_id"], "Alerts are working. Today's picks will arrive here each weekday morning.")
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail="The text didn't go through. Try again in a minute.") from exc
+    return {"sent": True}
+
+
+@app.delete("/api/imessage")
+def imessage_unlink(aitrader_session: str | None = Cookie(default=None)) -> dict[str, Any]:
+    user = _require_user(aitrader_session)
+    link = im_links.get(user.user_id)
+    removed = im_links.unlink(user.user_id)
+    if link and link["prefs"].get("verified") and _imsg_ready():
+        try:
+            _imsg_send(link["chat_id"], "AI Trader alerts are off. Reconnect any time from the Alerts page.")
+        except RuntimeError:
+            pass
+    return {"disconnected": removed}
+
+
+class InboundText(BaseModel):
+    message_id: str | None = None
+    phone: str = ""
+    text: str | None = None
+    vote: str | None = None
+
+
+_seen_inbound: dict[str, float] = {}
+
+
+def _order_reply(user, symbol: str, run_id: str) -> str:
+    from time import sleep
+    amount = settings.default_budget_usd
+    try:
+        result = _place_order(user, BuyPickPayload(symbol=symbol, amount=str(amount), run_id=run_id))
+    except HTTPException as exc:
+        return f"Not placed: {exc.detail}"
+    ex = result.get("execution") or {}
+    if ex.get("status") != "submitted":
+        return f"Not placed: {ex.get('message') or 'the broker declined it.'}"
+    broker = _broker_for_user(user.user_id)
+    for _ in range(3):
+        sleep(1.2)
+        try:
+            o = broker.get_order(ex["order_id"])
+        except Exception:  # noqa: BLE001
+            break
+        if o.get("status") == "filled":
+            return (f"Bought {o.get('filled_qty')} shares of {symbol} at "
+                    f"${float(o.get('filled_avg_price') or 0):,.2f}. {_base_url()}/stock/{symbol}")
+    return (f"Order sent: buy {alerts._money(amount)} of {symbol}. It fills while the market is open "
+            f"(9:30 AM to 4 PM ET). {_base_url()}/stock/{symbol}")
+
+
+@app.post("/api/imessage/inbound")
+def imessage_inbound(payload: InboundText, x_internal_secret: str | None = Header(default=None)) -> dict[str, Any]:
+    """A text or poll vote from Photon, relayed by /imsg. Returns what to send back."""
+    if not _imsg_ready() or x_internal_secret != _os.environ.get("IMSG_INTERNAL_SECRET"):
+        raise HTTPException(status_code=401, detail="Unauthorized.")
+    now = __import__("time").time()
+    if payload.message_id:
+        if payload.message_id in _seen_inbound:
+            return {}
+        _seen_inbound[payload.message_id] = now
+    phone = _norm_phone(payload.phone) or payload.phone
+    raw = (payload.vote or payload.text or "").strip()
+    t = _re.sub(r"[^A-Z. ]", "", raw.upper()).strip()
+    t = _re.sub(r"^BUY\s+", "", t)
+    print(f"imessage inbound from {_mask(phone)}: {t[:20]!r}")
+    link = im_links.by_chat(phone)
+    connect = f"This number isn't connected yet. Connect it at {_base_url()}/alerts"
+    if not link:
+        return {"text": connect}
+    prefs = link["prefs"]
+    user = users.get(link["user_id"])
+    if not user:
+        return {"text": connect}
+
+    if t in {"STOP", "UNSUBSCRIBE", "CANCEL", "END", "QUIT"}:
+        im_links.unlink(user.user_id)
+        return {"text": "Alerts are off. Reconnect any time from the Alerts page in the app."}
+
+    if not prefs.get("verified"):
+        if t in {"YES", "Y", "START", "CONNECT", "OK"}:
+            im_links.set_prefs(user.user_id, {"verified": True})
+            return {"text": "Connected. You'll get today's picks here each weekday around 9 AM ET, and a text when "
+                            "an order is placed or canceled. Reply PICKS any time, STOP to turn alerts off."}
+        if t in {"NO", "N"}:
+            im_links.unlink(user.user_id)
+            return {"text": "OK, not connected. Nothing more will be sent."}
+        return {"text": "Reply YES to connect AI Trader alerts, or NO if this wasn't you."}
+
+    if t in {"PICKS", "PICK", "TODAY"}:
+        run = picks_store.latest()
+        if not run or run.get("status") != "ok":
+            return {"text": "Today's picks aren't ready yet. They arrive each weekday around 9 AM ET."}
+        text, poll, syms = alerts.imessage_digest(run, _base_url(), settings.default_budget_usd)
+        im_links.set_prefs(user.user_id, {"pending": {"run_id": run["run_id"], "symbols": syms,
+                                                      "exp": now + 8 * 3600} if syms else None})
+        return {"text": text, "poll": poll}
+    if t in {"HELP", "INFO", "?"}:
+        return {"text": "AI Trader alerts. Reply PICKS for today's picks, a symbol like META to buy it when it's "
+                        "a pick, NO to skip, STOP to turn alerts off."}
+
+    pending = prefs.get("pending") or {}
+    syms = (pending.get("symbols") or []) if pending.get("exp", 0) > now else []
+    if t in {"NO", "N", "SKIP", "SKIP TODAY", "PASS"}:
+        im_links.set_prefs(user.user_id, {"pending": None})
+        return {"text": "Skipped. Nothing was bought."}
+    choice = None
+    if t in syms:
+        choice = t
+    elif t in {"YES", "Y", "OK", "BUY"}:
+        if len(syms) == 1:
+            choice = syms[0]
+        elif syms:
+            return {"text": f"Which one? Reply {' or '.join(syms)}."}
+    if choice:
+        if _needs_broker(user):
+            return {"text": f"Connect a broker first: {_base_url()}/connect"}
+        left = [x for x in syms if x != choice]
+        im_links.set_prefs(user.user_id, {"pending": {**pending, "symbols": left} if left else None})
+        return {"text": _order_reply(user, choice, pending["run_id"])}
+    if t in {"YES", "Y"} or (len(t) <= 5 and t.isalpha() and t not in {"HI", "HEY", "HELLO", "THANKS"}):
+        return {"text": "There's nothing to buy from that right now. Reply PICKS for today's picks."}
+    return {"text": "Reply PICKS for today's picks, or STOP to turn alerts off."}
 
 
 class CredentialsPayload(BaseModel):

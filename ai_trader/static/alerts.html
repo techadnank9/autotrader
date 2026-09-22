@@ -8,23 +8,29 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/static/app.css?v=20260921165253">
-<link rel="stylesheet" href="/static/dashboard.css?v=20260921165253">
+<link rel="stylesheet" href="/static/app.css?v=20260921173257">
+<link rel="stylesheet" href="/static/dashboard.css?v=20260921173257">
 </head>
 <body>
 <main class="page">
   <section class="call al-head">
     <div class="al-title">
-      <div><h1>Alerts</h1><p class="panel-sub">Today's picks and your order updates, sent to your phone on Telegram.</p></div>
+      <div><h1>Alerts</h1><p class="panel-sub">Today's picks and your order updates, sent to your phone by iMessage or Telegram.</p></div>
       <span class="pill" id="tg-pill"><i></i>Checking…</span>
     </div>
   </section>
 
   <div class="al-grid">
-    <section class="panel" aria-labelledby="tg-h">
-      <h2 id="tg-h">Telegram</h2>
-      <div id="tg"><p class="skel">Checking…</p></div>
-    </section>
+    <div class="al-col">
+      <section class="panel" aria-labelledby="im-h" id="im-sec" hidden>
+        <div class="ch-head"><h2 id="im-h">iMessage</h2><span class="pill" id="im-pill"><i></i>Not connected</span></div>
+        <div id="im"></div>
+      </section>
+      <section class="panel" aria-labelledby="tg-h">
+        <div class="ch-head"><h2 id="tg-h">Telegram</h2><span class="pill" id="tg-pill2"><i></i>Not connected</span></div>
+        <div id="tg"><p class="skel">Checking…</p></div>
+      </section>
+    </div>
 
     <section class="panel" aria-labelledby="pv-h">
       <h2 id="pv-h">What you'll get</h2>
@@ -41,17 +47,17 @@
         <div class="tg-btns"><span>Open today's picks</span></div>
       </div>
       <ul class="al-list">
-        <li><b>Today's picks</b><span>Every weekday around 9 AM ET. Tap Buy, then Confirm, and the order goes to your broker.</span></li>
+        <li><b>Today's picks</b><span>Every weekday around 9 AM ET. In iMessage, vote Buy or reply YES; in Telegram, tap Buy then Confirm. The order goes to your broker.</span></li>
         <li><b>Order updates</b><span>When an order is sent, filled right away, or canceled, from the app or from Telegram.</span></li>
-        <li><b>On demand</b><span>Send <code>/picks</code> to the bot any time. <code>/stop</code> disconnects.</span></li>
+        <li><b>On demand</b><span>Text <code>PICKS</code> (iMessage) or send <code>/picks</code> (Telegram) any time. <code>STOP</code> turns alerts off.</span></li>
       </ul>
     </section>
   </div>
 
   <footer class="foot"><p>Not investment advice. Nothing is bought unless you tap Confirm.</p></footer>
 </main>
-<script src="/static/charts.js?v=20260921165253"></script>
-<script src="/static/shell.js?v=20260921165253"></script>
-<script src="/static/alerts.js?v=20260921165253"></script>
+<script src="/static/charts.js?v=20260921173257"></script>
+<script src="/static/shell.js?v=20260921173257"></script>
+<script src="/static/alerts.js?v=20260921173257"></script>
 </body>
 </html>

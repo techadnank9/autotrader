@@ -74,8 +74,10 @@ def _row(user_id: str, chat_id: str, username: str | None, name: str | None,
 
 
 class FileLinkStore:
-    def __init__(self, root: str | Path) -> None:
-        self.path = Path(root) / "telegram_links.json"
+    """`chat_id` is the Telegram chat id, or the phone number for iMessage."""
+
+    def __init__(self, root: str | Path, filename: str = "telegram_links.json") -> None:
+        self.path = Path(root) / filename
 
     def _read(self) -> dict[str, Any]:
         try:
@@ -123,7 +125,7 @@ class FileLinkStore:
 
 class PostgresLinkStore:
     SCHEMA = """
-    CREATE TABLE IF NOT EXISTS telegram_links (
+    CREATE TABLE IF NOT EXISTS {table} (
         user_id   TEXT PRIMARY KEY,
         chat_id   TEXT UNIQUE NOT NULL,
         username  TEXT,
@@ -133,15 +135,17 @@ class PostgresLinkStore:
     );
     """
 
-    def __init__(self, db: Any) -> None:
+    def __init__(self, db: Any, table: str = "telegram_links") -> None:
+        assert table.isidentifier()
         self.db = db
+        self.t = table
         self._ready = False
 
     def _conn(self):
         conn = self.db.connect()
         if not self._ready:
             with conn.cursor() as cur:
-                cur.execute(self.SCHEMA)
+                cur.execute(self.SCHEMA.format(table=self.t))
             conn.commit()
             self._ready = True
         return conn
@@ -155,9 +159,9 @@ class PostgresLinkStore:
 
     def link(self, user_id: str, chat_id: str, username: str | None, name: str | None) -> dict[str, Any]:
         with self._conn() as conn, conn.cursor() as cur:
-            cur.execute("DELETE FROM telegram_links WHERE chat_id = %s AND user_id <> %s", (str(chat_id), user_id))
+            cur.execute(f"DELETE FROM {self.t} WHERE chat_id = %s AND user_id <> %s", (str(chat_id), user_id))
             cur.execute(
-                """INSERT INTO telegram_links (user_id, chat_id, username, name, linked_at, prefs)
+                f"""INSERT INTO {self.t} (user_id, chat_id, username, name, linked_at, prefs)
                    VALUES (%s, %s, %s, %s, %s, %s)
                    ON CONFLICT (user_id) DO UPDATE SET chat_id = EXCLUDED.chat_id, username = EXCLUDED.username,
                        name = EXCLUDED.name, linked_at = EXCLUDED.linked_at
@@ -167,17 +171,17 @@ class PostgresLinkStore:
 
     def get(self, user_id: str) -> dict[str, Any] | None:
         with self._conn() as conn, conn.cursor() as cur:
-            cur.execute("SELECT * FROM telegram_links WHERE user_id = %s", (user_id,))
+            cur.execute(f"SELECT * FROM {self.t} WHERE user_id = %s", (user_id,))
             return self._out(cur.fetchone())
 
     def by_chat(self, chat_id: str) -> dict[str, Any] | None:
         with self._conn() as conn, conn.cursor() as cur:
-            cur.execute("SELECT * FROM telegram_links WHERE chat_id = %s", (str(chat_id),))
+            cur.execute(f"SELECT * FROM {self.t} WHERE chat_id = %s", (str(chat_id),))
             return self._out(cur.fetchone())
 
     def all(self) -> list[dict[str, Any]]:
         with self._conn() as conn, conn.cursor() as cur:
-            cur.execute("SELECT * FROM telegram_links")
+            cur.execute(f"SELECT * FROM {self.t}")
             return [self._out(r) for r in cur.fetchall()]
 
     def set_prefs(self, user_id: str, prefs: dict[str, Any]) -> dict[str, Any] | None:
@@ -186,13 +190,13 @@ class PostgresLinkStore:
             return None
         merged = {**row["prefs"], **prefs}
         with self._conn() as conn, conn.cursor() as cur:
-            cur.execute("UPDATE telegram_links SET prefs = %s WHERE user_id = %s RETURNING *",
+            cur.execute(f"UPDATE {self.t} SET prefs = %s WHERE user_id = %s RETURNING *",
                         (json.dumps(merged), user_id))
             return self._out(cur.fetchone())
 
     def unlink(self, user_id: str) -> bool:
         with self._conn() as conn, conn.cursor() as cur:
-            cur.execute("DELETE FROM telegram_links WHERE user_id = %s", (user_id,))
+            cur.execute(f"DELETE FROM {self.t} WHERE user_id = %s", (user_id,))
             return cur.rowcount > 0
 
 
@@ -242,3 +246,28 @@ def order_text(kind: str, symbol: str, detail: str) -> str:
     head = {"placed": "Order sent", "filled": "Order filled", "canceled": "Order canceled",
             "failed": "Order not placed"}.get(kind, kind)
     return f"<b>{head}</b> · {escape(symbol)}\n{escape(detail)}"
+
+
+def imessage_digest(run: dict[str, Any], base_url: str, amount: Any) -> tuple[str, dict[str, Any] | None, list[str]]:
+    """Plain text (iMessage has no formatting), an optional Buy/Skip poll, and the symbols it offers."""
+    picks = run.get("picks") or []
+    buys = [p for p in picks if p.get("verdict") == "buy"][:3]
+    watch = [p["symbol"] for p in picks if p.get("verdict") == "watch"]
+    day = time.strftime("%a %b %-d", time.localtime(run.get("created_at") or time.time()))
+    lines = [f"AI Trader · Today's picks, {day}", ""]
+    for p in buys:
+        summary = str(p.get("summary") or "")
+        lines += [f"{p['symbol']} · Buy", summary[:260] + ("…" if len(summary) > 260 else ""), ""]
+    if not buys:
+        lines += ["No buys today. Nothing cleared the bar, so sitting out is the call.", ""]
+    if watch:
+        lines += [f"Watch: {', '.join(watch[:6])}", ""]
+    syms = [p["symbol"] for p in buys]
+    if syms:
+        how = (f"Reply YES to buy {_money(amount)} of {syms[0]}, or NO to skip."
+               if len(syms) == 1 else f"Reply {' or '.join(syms)} to buy {_money(amount)}, or NO to skip.")
+        lines += [how, ""]
+    lines += [f"Details: {base_url}/app", "Not investment advice."]
+    poll = ({"title": f"Buy {_money(amount)} today?", "options": [f"Buy {s}" for s in syms] + ["Skip today"]}
+            if syms else None)
+    return "\n".join(lines), poll, syms

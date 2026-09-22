@@ -4,10 +4,12 @@
   async function api(u, o) { var r = await fetch(u, o); var d = await r.json().catch(function () { return {}; }); if (!r.ok) throw new Error(d.detail || ("HTTP " + r.status)); return d; }
   var state = null, link = null, waiting = false, poll = null, linkTimer = null;
 
+  var im = null, imPoll = null;
+  function setPill(el, on, label) { el.className = "pill" + (on ? " on" : ""); el.innerHTML = "<i></i>" + (label || (on ? "Connected" : "Not connected")); }
   function pill(s) {
-    var p = $("tg-pill");
-    p.className = "pill" + (s.connected ? " on" : "");
-    p.innerHTML = "<i></i>" + (s.connected ? "Connected" : "Not connected");
+    setPill($("tg-pill2"), s.connected);
+    var any = (s && s.connected) || (im && im.connected);
+    setPill($("tg-pill"), any, any ? "Alerts on" : "Alerts off");
   }
 
   function sw(key, on, label, sub) {
@@ -114,9 +116,80 @@
     } catch (e) {}
   }
 
+  /* ---------- iMessage ---------- */
+  function renderIm() {
+    var s = im, el = $("im");
+    $("im-sec").hidden = !(s.available || s.is_demo) || s.is_demo;
+    if (s.is_demo || !s.available) return;
+    setPill($("im-pill"), s.connected, s.connected ? "Connected" : (s.waiting ? "Waiting for your reply" : "Not connected"));
+    if (state) pill(state);
+    if (s.connected) {
+      el.innerHTML =
+        '<div class="tg-conn"><span class="tg-avatar im">' + '\u2709' + '</span><div><b class="mono">' + esc(s.phone) + '</b>' +
+          '<span>Texts come from ' + esc(s.line || "AI Trader") + '. Save it as AI Trader.</span></div></div>' +
+        '<div class="sw-list">' + sw("picks", s.prefs.picks, "Today's picks", "Weekdays around 9 AM ET, with a Buy poll") +
+          sw("orders", s.prefs.orders, "Order updates", "Sent, filled and canceled") + '</div>' +
+        '<p class="err" id="im-err" role="alert"></p>' +
+        '<div class="tg-actions"><button class="btn btn-primary" type="button" id="im-test">Text me today\u2019s picks</button>' +
+          '<button class="btn btn-quiet" type="button" id="im-off">Disconnect</button></div>';
+      el.querySelectorAll("[data-pref]").forEach(function (b) {
+        b.onclick = async function () {
+          var on = b.getAttribute("aria-checked") !== "true", body = {}; body[b.dataset.pref] = on; b.setAttribute("aria-checked", String(on));
+          try { im = await api("/api/imessage/prefs", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }); }
+          catch (err) { b.setAttribute("aria-checked", String(!on)); $("im-err").textContent = err.message; }
+        };
+      });
+      $("im-test").onclick = async function () {
+        var b = this; b.disabled = true; b.textContent = "Sending\u2026"; $("im-err").textContent = "";
+        try { await api("/api/imessage/test", { method: "POST" }); b.textContent = "Sent. Check Messages"; }
+        catch (err) { $("im-err").textContent = err.message; }
+        setTimeout(function () { b.disabled = false; b.textContent = "Text me today\u2019s picks"; }, 4000);
+      };
+      $("im-off").onclick = async function () {
+        if (!confirm("Turn off iMessage alerts?")) return;
+        try { await api("/api/imessage", { method: "DELETE" }); await refreshIm(); } catch (err) { $("im-err").textContent = err.message; }
+      };
+      return;
+    }
+    if (s.waiting) {
+      el.innerHTML =
+        '<p class="im-wait-t">We texted <b class="mono">' + esc(s.phone) + '</b> from ' + esc(s.line || "AI Trader") + '.</p>' +
+        '<p class="tg-wait"><span class="live-dot">Reply YES in Messages to finish</span></p>' +
+        '<p class="note-line">Nothing arrived? Make sure it\u2019s the number your iPhone uses for iMessage: Settings \u203a Messages \u203a Send &amp; Receive, and pick your phone number under \u201cStart new conversations from\u201d.</p>' +
+        '<p class="err" id="im-err" role="alert"></p>' +
+        '<div class="tg-actions"><button class="btn btn-ghost" type="button" id="im-again">Text me again</button>' +
+          '<button class="btn btn-quiet" type="button" id="im-change">Use a different number</button></div>';
+      $("im-again").onclick = async function () {
+        var b = this; b.disabled = true;
+        try { await api("/api/imessage/resend", { method: "POST" }); b.textContent = "Sent again"; }
+        catch (err) { $("im-err").textContent = err.message; }
+        setTimeout(function () { b.disabled = false; b.textContent = "Text me again"; }, 5000);
+      };
+      $("im-change").onclick = async function () { try { await api("/api/imessage", { method: "DELETE" }); } catch (e) {} refreshIm(); };
+      startImPoll();
+      return;
+    }
+    el.innerHTML =
+      '<p class="panel-sub">Get picks as a normal text on your iPhone. Vote Buy or reply YES, and the order is placed.</p>' +
+      '<form class="im-form" novalidate><label class="field grow"><span>Your iPhone number</span>' +
+        '<input id="im-phone" type="tel" inputmode="tel" autocomplete="tel" placeholder="(415) 555-0123"></label>' +
+        '<button class="btn btn-primary" type="submit" id="im-go">Text me</button></form>' +
+      '<p class="err" id="im-err" role="alert"></p>' +
+      '<p class="fine-line">We\u2019ll text you once to confirm. Reply YES and you\u2019re set. Reply STOP any time.</p>';
+    el.querySelector("form").onsubmit = async function (e) {
+      e.preventDefault();
+      var go = $("im-go"), phone = $("im-phone").value; go.disabled = true; go.textContent = "Texting\u2026"; $("im-err").textContent = "";
+      try { im = await api("/api/imessage/start", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ phone: phone }) }); im._raw = phone; renderIm(); }
+      catch (err) { $("im-err").textContent = err.message; go.disabled = false; go.textContent = "Text me"; }
+    };
+  }
+  function startImPoll() { if (imPoll) return; var n = 0; imPoll = setInterval(async function () { if (document.hidden) return; if (++n > 300) { clearInterval(imPoll); imPoll = null; return; } var raw = im && im._raw; try { var nx = await api("/api/imessage"); nx._raw = raw; var changed = nx.connected !== im.connected || nx.waiting !== im.waiting; im = nx; if (changed) { clearInterval(imPoll); imPoll = null; renderIm(); } } catch (e) {} }, 3000); }
+  async function refreshIm() { try { im = await api("/api/imessage"); renderIm(); } catch (e) {} }
+
   async function boot() {
     var user = await window.Shell.mount({ active: "alerts" });
     if (!user) return;
+    refreshIm();
     await refresh();
     preview();
     window.addEventListener("focus", function () { if (state && !state.connected) refresh(); });
