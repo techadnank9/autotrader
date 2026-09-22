@@ -188,9 +188,24 @@
   function stopImPoll() { if (imPoll) clearInterval(imPoll); imPoll = null; }
   async function refreshIm() { try { im = await api("/api/imessage"); renderIm(); } catch (e) {} }
 
+  async function loadAmount() {
+    var input = $("amt"), err = $("amt-err");
+    function fmt(v) { return Number(v).toFixed(2).replace(/\.00$/, ""); }
+    try { var d = await api("/api/settings"); input.value = fmt(d.amount_usd); } catch (e) {}
+    $("amt-form").onsubmit = async function (e) {
+      e.preventDefault();
+      var btn = $("amt-save"); btn.disabled = true; btn.textContent = "Saving\u2026"; err.textContent = "";
+      try { var d = await api("/api/settings", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ amount_usd: parseFloat(input.value) }) });
+        input.value = fmt(d.amount_usd); btn.textContent = "Saved"; }
+      catch (e2) { err.textContent = e2.message; btn.textContent = "Save"; }
+      setTimeout(function () { btn.disabled = false; btn.textContent = "Save"; }, 2500);
+    };
+  }
+
   async function boot() {
     var user = await window.Shell.mount({ active: "alerts" });
     if (!user) return;
+    if (!user.is_demo) loadAmount(); else $("amt-form") && ($("amt-form").parentElement.parentElement.parentElement.hidden = true);
     refreshIm();
     await refresh();
     preview();

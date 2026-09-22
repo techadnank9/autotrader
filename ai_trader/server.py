@@ -25,6 +25,7 @@ from ai_trader import alerts
 from ai_trader import google_oauth
 from ai_trader import robinhood_mcp as rh
 from ai_trader.picks import FilePicksStore, PicksService
+from ai_trader.prefs import FileUserPrefs, PostgresUserPrefs
 from ai_trader import market
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -79,16 +80,32 @@ def _build_stores():
             return (PostgresUserStore(database), PostgresDecisionStore(database),
                     PostgresCredentialStore(database, cipher), PostgresPicksStore(database),
                     alerts.PostgresLinkStore(database), alerts.PostgresLinkStore(database, "imessage_links"),
-                    "postgres")
+                    PostgresUserPrefs(database), "postgres")
         except Exception as exc:  # a broken DSN must not take the whole app down
             print(f"Postgres unavailable, falling back to file stores: {exc}")
     return (UserStore(settings.account_dir), DecisionStore(settings.decision_dir),
             FileCredentialStore(settings.account_dir, cipher), FilePicksStore(settings.replay_log_dir),
             alerts.FileLinkStore(settings.account_dir), alerts.FileLinkStore(settings.account_dir, "imessage_links.json"),
-            "files")
+            FileUserPrefs(settings.account_dir), "files")
 
 
-users, decision_store, credential_store, picks_store, tg_links, im_links, STORAGE_BACKEND = _build_stores()
+users, decision_store, credential_store, picks_store, tg_links, im_links, user_prefs, STORAGE_BACKEND = _build_stores()
+
+
+def _amount_for(user) -> Decimal:
+    """The dollars a one-tap buy uses: the user's own setting, else the default."""
+    try:
+        a = user_prefs.get(user.user_id).get("amount_usd")
+        if a and float(a) > 0:
+            return min(Decimal(str(a)), settings.max_budget_usd)
+    except Exception:  # noqa: BLE001
+        pass
+    return settings.default_budget_usd
+
+
+def _amount_for_id(user_id: str) -> Decimal:
+    u = users.get(user_id)
+    return _amount_for(u) if u else settings.default_budget_usd
 picks = PicksService(engine, picks_store, ttl_hours=settings.picks_ttl_hours,
                      budget=min(settings.default_budget_usd, settings.max_budget_usd))
 decisions = DecisionService(decision_store, executor=_execute_decision)
@@ -526,7 +543,7 @@ def _notify(user_id: str, kind: str, text: str, rows: list | None = None) -> Non
 
 
 def _send_digest(link: dict[str, Any], run: dict[str, Any]) -> dict[str, Any]:
-    text, rows = alerts.picks_digest(run, _base_url(), settings.default_budget_usd)
+    text, rows = alerts.picks_digest(run, _base_url(), _amount_for_id(link["user_id"]))
     return telegram.send(link["chat_id"], text, rows)
 
 
@@ -699,7 +716,7 @@ def _tg_callback(cb: dict[str, Any]) -> None:
         return
     data = str(cb.get("data") or "")
     action, _, rest = data.partition(":")
-    amount = settings.default_budget_usd
+    amount = _amount_for(user)
 
     if action == "px":
         telegram.answer_callback(cb_id, "Canceled.")
@@ -871,7 +888,7 @@ def _imsg_send(phone: str, text: str | None = None, poll: dict | None = None) ->
 
 
 def _imsg_digest(link: dict[str, Any], run: dict[str, Any]) -> None:
-    text, poll, syms = alerts.imessage_digest(run, _base_url(), settings.default_budget_usd)
+    text, poll, syms = alerts.imessage_digest(run, _base_url(), _amount_for_id(link["user_id"]))
     im_links.set_prefs(link["user_id"], {"pending": {"run_id": run["run_id"], "symbols": syms,
                                                      "exp": run.get("created_at", 0) + 8 * 3600} if syms else None})
     _imsg_send(link["chat_id"], text, poll)
@@ -976,9 +993,9 @@ class InboundText(BaseModel):
 _seen_inbound: dict[str, float] = {}
 
 
-def _order_reply(user, symbol: str, run_id: str) -> str:
+def _order_reply(user, symbol: str, run_id: str, amount: Decimal | None = None) -> str:
     from time import sleep
-    amount = settings.default_budget_usd
+    amount = amount if amount is not None else _amount_for(user)
     try:
         result = _place_order(user, BuyPickPayload(symbol=symbol, amount=str(amount), run_id=run_id))
     except HTTPException as exc:
@@ -1012,6 +1029,15 @@ def imessage_inbound(payload: InboundText, x_internal_secret: str | None = Heade
         _seen_inbound[payload.message_id] = now
     phone = _norm_phone(payload.phone) or payload.phone
     raw = (payload.vote or payload.text or "").strip()
+    amt_match = _re.search(r"\$?\s*(\d+(?:\.\d+)?)", raw)
+    inline_amount = None
+    if amt_match:
+        try:
+            v = Decimal(amt_match.group(1))
+            if v >= 1:
+                inline_amount = min(v, settings.max_budget_usd)
+        except (ValueError, ArithmeticError):
+            pass
     t = _re.sub(r"[^A-Z. ]", "", raw.upper()).strip()
     t = _re.sub(r"^BUY\s+", "", t)
     print(f"imessage inbound from {_mask(phone)}: {t[:20]!r}")
@@ -1046,7 +1072,7 @@ def imessage_inbound(payload: InboundText, x_internal_secret: str | None = Heade
         run = picks_store.latest()
         if not run or run.get("status") != "ok":
             return {"text": "Today's picks aren't ready yet. They arrive each weekday around 9 AM ET."}
-        text, poll, syms = alerts.imessage_digest(run, _base_url(), settings.default_budget_usd)
+        text, poll, syms = alerts.imessage_digest(run, _base_url(), _amount_for(user))
         im_links.set_prefs(user.user_id, {"pending": {"run_id": run["run_id"], "symbols": syms,
                                                       "exp": now + 8 * 3600} if syms else None})
         return {"text": text, "poll": poll}
@@ -1072,7 +1098,7 @@ def imessage_inbound(payload: InboundText, x_internal_secret: str | None = Heade
             return {"text": f"Connect a broker first: {_base_url()}/connect"}
         left = [x for x in syms if x != choice]
         im_links.set_prefs(user.user_id, {"pending": {**pending, "symbols": left} if left else None})
-        return {"text": _order_reply(user, choice, pending["run_id"])}
+        return {"text": _order_reply(user, choice, pending["run_id"], inline_amount)}
     if t in {"YES", "Y"} or (len(t) <= 5 and t.isalpha() and t not in {"HI", "HEY", "HELLO", "THANKS"}):
         return {"text": "There's nothing to buy from that right now. Reply PICKS for today's picks."}
     return {"text": "Reply PICKS for today's picks, or STOP to turn alerts off."}
@@ -1081,6 +1107,30 @@ def imessage_inbound(payload: InboundText, x_internal_secret: str | None = Heade
 class CredentialsPayload(BaseModel):
     email: str
     password: str
+
+
+class AmountPayload(BaseModel):
+    amount_usd: float = Field(gt=0)
+
+
+@app.get("/api/settings")
+def get_settings(aitrader_session: str | None = Cookie(default=None)) -> dict[str, Any]:
+    user = _require_user(aitrader_session)
+    return {"amount_usd": f"{_amount_for(user):.2f}", "max_amount_usd": f"{settings.max_budget_usd:.2f}"}
+
+
+@app.patch("/api/settings")
+def set_settings(payload: AmountPayload, aitrader_session: str | None = Cookie(default=None)) -> dict[str, Any]:
+    user = _require_user(aitrader_session)
+    if user.is_demo:
+        raise HTTPException(status_code=403, detail="Create an account to change this.")
+    amt = Decimal(str(payload.amount_usd))
+    if amt < 1:
+        raise HTTPException(status_code=400, detail="Pick at least $1.")
+    if amt > settings.max_budget_usd:
+        raise HTTPException(status_code=400, detail=f"The most per buy is ${settings.max_budget_usd:,.0f}.")
+    user_prefs.set_amount(user.user_id, float(amt))
+    return {"amount_usd": f"{amt:.2f}", "max_amount_usd": f"{settings.max_budget_usd:.2f}"}
 
 
 @app.get("/api/auth/me")
@@ -1390,7 +1440,7 @@ def _picks_view(run: dict[str, Any], user) -> dict[str, Any]:
         "status": run.get("status"),
         "message": run.get("message"),
         "articles_read": run.get("articles_read", 0),
-        "default_amount": f"{settings.default_budget_usd:.2f}",
+        "default_amount": f"{_amount_for(user):.2f}",
         "picks": run.get("picks", []),
         "bought": _bought_from(run["run_id"], user.user_id),
         "has_broker": not _needs_broker(user) and not user.is_demo,
@@ -1625,7 +1675,7 @@ def stock_overview(symbol: str, aitrader_session: str | None = Cookie(default=No
         "is_demo": user.is_demo,
         "broker": broker.name, "mode": "live" if getattr(broker, "live", False) else "paper",
         "buying_power": status.get("buying_power"),
-        "default_amount": f"{settings.default_budget_usd:.2f}",
+        "default_amount": f"{_amount_for(user):.2f}",
     }
 
 

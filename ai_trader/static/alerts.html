@@ -8,8 +8,8 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/static/app.css?v=20260921184334">
-<link rel="stylesheet" href="/static/dashboard.css?v=20260921184334">
+<link rel="stylesheet" href="/static/app.css?v=20260921192019">
+<link rel="stylesheet" href="/static/dashboard.css?v=20260921192019">
 </head>
 <body>
 <main class="page">
@@ -18,6 +18,17 @@
       <div><h1>Alerts</h1><p class="panel-sub">Today's picks and your order updates, sent to your phone by iMessage or Telegram.</p></div>
       <span class="pill" id="tg-pill"><i></i>Checking…</span>
     </div>
+  </section>
+
+  <section class="panel amount-panel" aria-labelledby="amt-h">
+    <div class="amt-row">
+      <div><h2 id="amt-h">Amount per buy</h2><p class="panel-sub">How much each one-tap buy invests — in a text, a poll, or the app. You can still change it on any order.</p></div>
+      <form class="amt-form" id="amt-form" novalidate>
+        <div class="amt-in"><span>$</span><input id="amt" inputmode="decimal" autocomplete="off" aria-label="Amount per buy"></div>
+        <button class="btn btn-primary" type="submit" id="amt-save">Save</button>
+      </form>
+    </div>
+    <p class="err" id="amt-err" role="alert"></p>
   </section>
 
   <div class="al-grid">
@@ -56,8 +67,8 @@
 
   <footer class="foot"><p>Not investment advice. Nothing is bought unless you tap Confirm.</p></footer>
 </main>
-<script src="/static/charts.js?v=20260921184334"></script>
-<script src="/static/shell.js?v=20260921184334"></script>
-<script src="/static/alerts.js?v=20260921184334"></script>
+<script src="/static/charts.js?v=20260921192019"></script>
+<script src="/static/shell.js?v=20260921192019"></script>
+<script src="/static/alerts.js?v=20260921192019"></script>
 </body>
 </html>

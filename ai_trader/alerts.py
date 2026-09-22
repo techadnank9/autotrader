@@ -264,8 +264,9 @@ def imessage_digest(run: dict[str, Any], base_url: str, amount: Any) -> tuple[st
         lines += [f"Watch: {', '.join(watch[:6])}", ""]
     syms = [p["symbol"] for p in buys]
     if syms:
-        how = (f"Reply YES to buy {_money(amount)} of {syms[0]}, or NO to skip."
-               if len(syms) == 1 else f"Reply {' or '.join(syms)} to buy {_money(amount)}, or NO to skip.")
+        how = (f"Reply YES to buy {_money(amount)} of {syms[0]} (or {syms[0]} 250 for a set amount), or NO to skip."
+               if len(syms) == 1
+               else f"Reply {' or '.join(syms)} to buy {_money(amount)} (add an amount, e.g. {syms[0]} 250), or NO to skip.")
         lines += [how, ""]
     lines += [f"Details: {base_url}/app", "Not investment advice."]
     poll = ({"title": f"Buy {_money(amount)} today?", "options": [f"Buy {s}" for s in syms] + ["Skip today"]}
