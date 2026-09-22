@@ -798,6 +798,7 @@ import re as _re
 import httpx as _httpx
 
 _SPECTRUM = "https://spectrum.photon.codes"
+_IMSG_LINE = _os.environ.get("IMSG_LINE", "+1 (415) 605-5508")
 
 
 def _imsg_ready() -> bool:
@@ -879,19 +880,28 @@ def _imsg_digest(link: dict[str, Any], run: dict[str, Any]) -> None:
 def _imsg_view(user) -> dict[str, Any]:
     link = im_links.get(user.user_id)
     prefs = (link or {}).get("prefs") or {}
+    verified = bool(link and prefs.get("verified"))
+    waiting = bool(link and not verified)
+    handle = link["chat_id"] if link else ""
     return {
         "available": _imsg_ready() and not user.is_demo,
         "is_demo": user.is_demo,
-        "connected": bool(link and prefs.get("verified")),
-        "waiting": bool(link and not prefs.get("verified")),
-        "phone": _mask(link["chat_id"]) if link else None,
-        "line": _pretty((link or {}).get("name")),
+        "connected": verified,
+        "waiting": waiting,
+        "phone": _mask(handle) if (verified and not handle.startswith("pending:")) else None,
+        "code": prefs.get("code") if waiting else None,
+        "line": _IMSG_LINE,
+        "line_plain": "+" + _re.sub(r"\D", "", _IMSG_LINE),
         "prefs": {"picks": prefs.get("picks", True), "orders": prefs.get("orders", True)},
     }
 
 
-class PhonePayload(BaseModel):
-    phone: str
+_CODE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"
+
+
+def _new_code() -> str:
+    import secrets as _secrets
+    return "".join(_secrets.choice(_CODE_ALPHABET) for _ in range(5))
 
 
 @app.get("/api/imessage")
@@ -899,47 +909,21 @@ def imessage_me(aitrader_session: str | None = Cookie(default=None)) -> dict[str
     return _imsg_view(_require_user(aitrader_session))
 
 
-@app.post("/api/imessage/start")
-def imessage_start(payload: PhonePayload, aitrader_session: str | None = Cookie(default=None)) -> dict[str, Any]:
+@app.post("/api/imessage/code")
+def imessage_code(aitrader_session: str | None = Cookie(default=None)) -> dict[str, Any]:
+    """Issue a short code the user texts to our line. Their reply proves the phone
+    is theirs and hands us the exact iMessage handle to send to."""
     user = _require_user(aitrader_session)
     if user.is_demo:
         raise HTTPException(status_code=403, detail="Create an account to get alerts.")
     if not _imsg_ready():
         raise HTTPException(status_code=503, detail="Text alerts aren't available right now.")
-    phone = _norm_phone(payload.phone)
-    if not phone:
-        raise HTTPException(status_code=400, detail="Enter a mobile number, like (415) 555-0123.")
-    other = im_links.by_chat(phone)
-    if other and other["user_id"] != user.user_id and other["prefs"].get("verified"):
-        raise HTTPException(status_code=409, detail="That number is already connected to another account.")
-    pu = _photon_user(phone, user.email)
-    im_links.link(user.user_id, phone, None, pu.get("assignedPhoneNumber"))
-    im_links.set_prefs(user.user_id, {"verified": False, "pending": None})
-    try:
-        _imsg_send(phone, "AI Trader here. Reply YES to get today's picks and your order updates in iMessage. "
-                          "Reply NO if this wasn't you.")
-    except RuntimeError as exc:
-        im_links.unlink(user.user_id)
-        msg = str(exc)
-        if "not allowed" in msg.lower():
-            msg = ("We couldn't reach that number on iMessage. Check it's the number your iPhone uses for "
-                   "iMessage (Settings, Messages, Send & Receive).")
-        else:
-            msg = "We couldn't send the text. Try again in a minute."
-        raise HTTPException(status_code=502, detail=msg) from exc
-    return _imsg_view(user)
-
-
-@app.post("/api/imessage/resend")
-def imessage_resend(aitrader_session: str | None = Cookie(default=None)) -> dict[str, Any]:
-    user = _require_user(aitrader_session)
-    link = im_links.get(user.user_id)
-    if not link or link["prefs"].get("verified"):
-        raise HTTPException(status_code=409, detail="Nothing to resend.")
-    try:
-        _imsg_send(link["chat_id"], "AI Trader here. Reply YES to get today's picks and your order updates in iMessage.")
-    except RuntimeError as exc:
-        raise HTTPException(status_code=502, detail="We couldn't send the text. Try again in a minute.") from exc
+    existing = im_links.get(user.user_id)
+    if existing and existing["prefs"].get("verified"):
+        raise HTTPException(status_code=409, detail="Text alerts are already connected.")
+    code = _new_code()
+    im_links.link(user.user_id, f"pending:{code}", None, None)
+    im_links.set_prefs(user.user_id, {"verified": False, "code": code, "code_exp": __import__("time").time() + 1800})
     return _imsg_view(user)
 
 
@@ -1032,8 +1016,22 @@ def imessage_inbound(payload: InboundText, x_internal_secret: str | None = Heade
     t = _re.sub(r"^BUY\s+", "", t)
     print(f"imessage inbound from {_mask(phone)}: {t[:20]!r}")
     link = im_links.by_chat(phone)
-    connect = f"This number isn't connected yet. Connect it at {_base_url()}/alerts"
+    connect = f"To connect, open {_base_url()}/alerts and tap Text to connect."
     if not link:
+        # An unrecognised handle: maybe it carries a pending connect code.
+        code = _re.sub(r"[^A-Z0-9]", "", (payload.text or "").upper())
+        pending = im_links.by_chat(f"pending:{code}") if len(code) == 5 else None
+        if pending and (pending["prefs"].get("code_exp", 0) > now):
+            u = users.get(pending["user_id"])
+            if u:
+                im_links.link(u.user_id, phone, None, _IMSG_LINE)   # bind the real handle Apple uses
+                im_links.set_prefs(u.user_id, {"verified": True, "code": None})
+                try:  # allow-list the handle so the morning picks can be initiated
+                    _photon_user(phone, u.email)
+                except Exception:  # noqa: BLE001
+                    pass
+                return {"text": "Connected. You'll get today's picks here each weekday around 9 AM ET, and a text "
+                                "when an order is placed or canceled. Reply PICKS any time, STOP to turn alerts off."}
         return {"text": connect}
     prefs = link["prefs"]
     user = users.get(link["user_id"])
@@ -1043,16 +1041,6 @@ def imessage_inbound(payload: InboundText, x_internal_secret: str | None = Heade
     if t in {"STOP", "UNSUBSCRIBE", "CANCEL", "END", "QUIT"}:
         im_links.unlink(user.user_id)
         return {"text": "Alerts are off. Reconnect any time from the Alerts page in the app."}
-
-    if not prefs.get("verified"):
-        if t in {"YES", "Y", "START", "CONNECT", "OK"}:
-            im_links.set_prefs(user.user_id, {"verified": True})
-            return {"text": "Connected. You'll get today's picks here each weekday around 9 AM ET, and a text when "
-                            "an order is placed or canceled. Reply PICKS any time, STOP to turn alerts off."}
-        if t in {"NO", "N"}:
-            im_links.unlink(user.user_id)
-            return {"text": "OK, not connected. Nothing more will be sent."}
-        return {"text": "Reply YES to connect AI Trader alerts, or NO if this wasn't you."}
 
     if t in {"PICKS", "PICK", "TODAY"}:
         run = picks_store.latest()

@@ -117,20 +117,24 @@
   }
 
   /* ---------- iMessage ---------- */
+  function smsHref(line, code) { return "sms:" + line + "&body=" + encodeURIComponent(code); }
+
   function renderIm() {
     var s = im, el = $("im");
-    $("im-sec").hidden = !(s.available || s.is_demo) || s.is_demo;
+    $("im-sec").hidden = s.is_demo || !s.available;
     if (s.is_demo || !s.available) return;
-    setPill($("im-pill"), s.connected, s.connected ? "Connected" : (s.waiting ? "Waiting for your reply" : "Not connected"));
+    setPill($("im-pill"), s.connected, s.connected ? "Connected" : (s.waiting ? "Waiting for your text" : "Not connected"));
     if (state) pill(state);
+
     if (s.connected) {
+      stopImPoll();
       el.innerHTML =
-        '<div class="tg-conn"><span class="tg-avatar im">' + '\u2709' + '</span><div><b class="mono">' + esc(s.phone) + '</b>' +
-          '<span>Texts come from ' + esc(s.line || "AI Trader") + '. Save it as AI Trader.</span></div></div>' +
-        '<div class="sw-list">' + sw("picks", s.prefs.picks, "Today's picks", "Weekdays around 9 AM ET, with a Buy poll") +
+        '<div class="tg-conn"><span class="tg-avatar im">✉</span><div><b>iMessage</b>' +
+          '<span>Texts come from ' + esc(s.line || "our number") + '. Save it as AI Trader.</span></div></div>' +
+        '<div class="sw-list">' + sw("picks", s.prefs.picks, "Today’s picks", "Weekdays around 9 AM ET, with a Buy poll") +
           sw("orders", s.prefs.orders, "Order updates", "Sent, filled and canceled") + '</div>' +
         '<p class="err" id="im-err" role="alert"></p>' +
-        '<div class="tg-actions"><button class="btn btn-primary" type="button" id="im-test">Text me today\u2019s picks</button>' +
+        '<div class="tg-actions"><button class="btn btn-primary" type="button" id="im-test">Text me today’s picks</button>' +
           '<button class="btn btn-quiet" type="button" id="im-off">Disconnect</button></div>';
       el.querySelectorAll("[data-pref]").forEach(function (b) {
         b.onclick = async function () {
@@ -140,10 +144,10 @@
         };
       });
       $("im-test").onclick = async function () {
-        var b = this; b.disabled = true; b.textContent = "Sending\u2026"; $("im-err").textContent = "";
+        var b = this; b.disabled = true; b.textContent = "Sending…"; $("im-err").textContent = "";
         try { await api("/api/imessage/test", { method: "POST" }); b.textContent = "Sent. Check Messages"; }
         catch (err) { $("im-err").textContent = err.message; }
-        setTimeout(function () { b.disabled = false; b.textContent = "Text me today\u2019s picks"; }, 4000);
+        setTimeout(function () { b.disabled = false; b.textContent = "Text me today’s picks"; }, 4000);
       };
       $("im-off").onclick = async function () {
         if (!confirm("Turn off iMessage alerts?")) return;
@@ -151,39 +155,37 @@
       };
       return;
     }
-    if (s.waiting) {
-      el.innerHTML =
-        '<p class="im-wait-t">We texted <b class="mono">' + esc(s.phone) + '</b> from ' + esc(s.line || "AI Trader") + '.</p>' +
-        '<p class="tg-wait"><span class="live-dot">Reply YES in Messages to finish</span></p>' +
-        '<p class="note-line">Nothing arrived? Make sure it\u2019s the number your iPhone uses for iMessage: Settings \u203a Messages \u203a Send &amp; Receive, and pick your phone number under \u201cStart new conversations from\u201d.</p>' +
-        '<p class="err" id="im-err" role="alert"></p>' +
-        '<div class="tg-actions"><button class="btn btn-ghost" type="button" id="im-again">Text me again</button>' +
-          '<button class="btn btn-quiet" type="button" id="im-change">Use a different number</button></div>';
-      $("im-again").onclick = async function () {
-        var b = this; b.disabled = true;
-        try { await api("/api/imessage/resend", { method: "POST" }); b.textContent = "Sent again"; }
-        catch (err) { $("im-err").textContent = err.message; }
-        setTimeout(function () { b.disabled = false; b.textContent = "Text me again"; }, 5000);
-      };
-      $("im-change").onclick = async function () { try { await api("/api/imessage", { method: "DELETE" }); } catch (e) {} refreshIm(); };
+
+    if (s.waiting && s.code) {
       startImPoll();
+      el.innerHTML =
+        '<p class="panel-sub">Send this code to our number and you’re connected. Texting from your phone is what links it — no number to type.</p>' +
+        '<div class="im-code"><span class="im-code-v mono">' + esc(s.code) + '</span>' +
+          '<span class="im-code-to">to <b class="mono">' + esc(s.line) + '</b></span></div>' +
+        '<div class="tg-actions">' +
+          '<a class="btn btn-primary" id="im-open" href="' + esc(smsHref(s.line_plain, s.code)) + '">Open Messages</a>' +
+          '<button class="btn btn-ghost" type="button" id="im-copy">Copy number</button></div>' +
+        '<p class="tg-wait" style="margin-top:16px"><span class="live-dot">Waiting for your text…</span></p>' +
+        '<p class="note-line">On a computer? Text the code from your iPhone. This page connects on its own once it arrives.</p>' +
+        '<p class="fine-line"><button type="button" class="link-btn" id="im-cancel">Cancel</button></p>';
+      $("im-copy").onclick = function () { navigator.clipboard && navigator.clipboard.writeText(s.line_plain); this.textContent = "Copied"; };
+      $("im-cancel").onclick = async function () { try { await api("/api/imessage", { method: "DELETE" }); } catch (e) {} refreshIm(); };
       return;
     }
+
     el.innerHTML =
       '<p class="panel-sub">Get picks as a normal text on your iPhone. Vote Buy or reply YES, and the order is placed.</p>' +
-      '<form class="im-form" novalidate><label class="field grow"><span>Your iPhone number</span>' +
-        '<input id="im-phone" type="tel" inputmode="tel" autocomplete="tel" placeholder="(415) 555-0123"></label>' +
-        '<button class="btn btn-primary" type="submit" id="im-go">Text me</button></form>' +
       '<p class="err" id="im-err" role="alert"></p>' +
-      '<p class="fine-line">We\u2019ll text you once to confirm. Reply YES and you\u2019re set. Reply STOP any time.</p>';
-    el.querySelector("form").onsubmit = async function (e) {
-      e.preventDefault();
-      var go = $("im-go"), phone = $("im-phone").value; go.disabled = true; go.textContent = "Texting\u2026"; $("im-err").textContent = "";
-      try { im = await api("/api/imessage/start", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ phone: phone }) }); im._raw = phone; renderIm(); }
-      catch (err) { $("im-err").textContent = err.message; go.disabled = false; go.textContent = "Text me"; }
+      '<button class="btn btn-primary btn-block" type="button" id="im-start">Text to connect</button>' +
+      '<p class="fine-line">You’ll text a short code to our number once. Reply STOP any time to turn alerts off.</p>';
+    $("im-start").onclick = async function () {
+      this.disabled = true; this.textContent = "Preparing…";
+      try { im = await api("/api/imessage/code", { method: "POST" }); renderIm(); }
+      catch (err) { $("im-err").textContent = err.message; this.disabled = false; this.textContent = "Text to connect"; }
     };
   }
-  function startImPoll() { if (imPoll) return; var n = 0; imPoll = setInterval(async function () { if (document.hidden) return; if (++n > 300) { clearInterval(imPoll); imPoll = null; return; } var raw = im && im._raw; try { var nx = await api("/api/imessage"); nx._raw = raw; var changed = nx.connected !== im.connected || nx.waiting !== im.waiting; im = nx; if (changed) { clearInterval(imPoll); imPoll = null; renderIm(); } } catch (e) {} }, 3000); }
+  function startImPoll() { if (imPoll) return; var n = 0; imPoll = setInterval(async function () { if (document.hidden) return; if (++n > 400) return stopImPoll(); try { var nx = await api("/api/imessage"); var changed = nx.connected !== im.connected; im = nx; if (changed || !nx.waiting) { stopImPoll(); renderIm(); } } catch (e) {} }, 3000); }
+  function stopImPoll() { if (imPoll) clearInterval(imPoll); imPoll = null; }
   async function refreshIm() { try { im = await api("/api/imessage"); renderIm(); } catch (e) {} }
 
   async function boot() {

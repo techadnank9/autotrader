@@ -466,3 +466,7 @@ a.link-btn{text-decoration:none}
 #im .note-line{margin-top:14px}
 #im .err:empty{display:none}
 @media (max-width:560px){.im-form{flex-direction:column;align-items:stretch}}
+.im-code{margin:18px 0 0;display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
+.im-code-v{font-size:34px;font-weight:600;letter-spacing:.18em;color:var(--accent);padding:6px 14px;border-radius:12px;background:var(--surface-2);border:1px solid var(--line)}
+.im-code-to{color:var(--text-2);font-size:14px}
+.im-code-to b{color:var(--text)}
