@@ -61,6 +61,11 @@ def _execute_decision(decision: Decision) -> dict[str, Any]:
             decision.symbol, Decimal(decision.amount_usd), client_order_id=decision.decision_id
         )
     dec = lambda k: Decimal(spec[k]) if spec.get(k) not in (None, "") else None  # noqa: E731
+    if decision.side == "sell":
+        return user_broker.place_sell(
+            decision.symbol, client_order_id=decision.decision_id, qty=dec("qty"),
+            limit_price=dec("limit_price"), good_until=spec.get("good_until") or "day",
+        )
     return user_broker.place_buy(
         decision.symbol, client_order_id=decision.decision_id,
         notional=dec("notional"), qty=dec("qty"),
@@ -1028,6 +1033,29 @@ def _order_reply(user, symbol: str, run_id: str, amount: Decimal | None = None) 
             f"(9:30 AM to 4 PM ET). {_base_url()}/stock/{symbol}")
 
 
+def _sell_reply(user, symbol: str, qty: Decimal | None) -> str:
+    from time import sleep
+    try:
+        result = _place_sell(user, SellPayload(symbol=symbol, qty=str(qty) if qty is not None else None))
+    except HTTPException as exc:
+        return f"Not sold: {exc.detail}"
+    ex = result.get("execution") or {}
+    if ex.get("status") != "submitted":
+        return f"Not sold: {ex.get('message') or 'the broker declined it.'}"
+    broker = _broker_for_user(user.user_id)
+    for _ in range(3):
+        sleep(1.2)
+        try:
+            o = broker.get_order(ex["order_id"])
+        except Exception:  # noqa: BLE001
+            break
+        if o.get("status") == "filled":
+            return (f"Sold {o.get('filled_qty')} shares of {symbol} at "
+                    f"${float(o.get('filled_avg_price') or 0):,.2f}. {_base_url()}/stock/{symbol}")
+    return (f"Sell sent: {result['order'].get('qty')} shares of {symbol}. It fills while the market is open "
+            f"(9:30 AM to 4 PM ET). {_base_url()}/stock/{symbol}")
+
+
 @app.post("/api/imessage/inbound")
 def imessage_inbound(payload: InboundText, x_internal_secret: str | None = Header(default=None)) -> dict[str, Any]:
     """A text or poll vote from Photon, relayed by /imsg. Returns what to send back."""
@@ -1089,7 +1117,22 @@ def imessage_inbound(payload: InboundText, x_internal_secret: str | None = Heade
         return {"text": text, "poll": poll}
     if t in {"HELP", "INFO", "?"}:
         return {"text": "AI Trader alerts. Reply PICKS for today's picks, a symbol like META to buy it when it's "
-                        "a pick, NO to skip, STOP to turn alerts off."}
+                        "a pick, SELL META to sell what you hold, NO to skip, STOP to turn alerts off."}
+
+    if t.startswith("SELL"):
+        # "SELL META" sells the lot; "SELL META 2" or "SELL META 0.5" sells that many shares.
+        m = _re.match(r"^\s*sell\s+(?:all\s+)?([A-Za-z.]{1,8})(?:\s+([0-9]*\.?[0-9]+))?\s*$", raw, _re.I)
+        if not m:
+            return {"text": "Which one? Reply SELL META, or SELL META 2 to sell part of it."}
+        qty = None
+        if m.group(2):
+            try:
+                qty = Decimal(m.group(2))
+            except ArithmeticError:
+                qty = None
+            if qty is not None and qty <= 0:
+                return {"text": "Enter a number of shares above zero."}
+        return {"text": _sell_reply(user, m.group(1).upper(), qty)}
 
     pending = prefs.get("pending") or {}
     syms = (pending.get("symbols") or []) if pending.get("exp", 0) > now else []
@@ -1610,6 +1653,73 @@ def _place_order(user, payload: OrderPayload) -> dict[str, Any]:
             "order": {**order, "estimate": str(estimate)}}
 
 
+class SellPayload(BaseModel):
+    symbol: str
+    qty: str | None = None          # left out means sell the whole position
+    order_type: str = Field(default="market", pattern="^(market|limit)$")
+    limit_price: str | None = None
+    good_until: str = Field(default="day", pattern="^(day|gtc)$")
+
+
+def _place_sell(user, payload: SellPayload) -> dict[str, Any]:
+    """Selling goes through the same gate as buying, so every order has one path."""
+    if user.is_demo:
+        raise HTTPException(status_code=403, detail="Create an account and connect a broker to sell.")
+    if _needs_broker(user):
+        raise HTTPException(status_code=400, detail="Connect a broker to sell.")
+    symbol = payload.symbol.upper().strip()
+    if not symbol.replace(".", "").isalnum() or len(symbol) > 8:
+        raise HTTPException(status_code=400, detail="That is not a stock symbol.")
+
+    broker = _broker_for_user(user.user_id)
+    available = broker.shares_available(symbol)
+    if available <= 0:
+        raise HTTPException(status_code=400, detail=f"You don't hold any {symbol} to sell.")
+    qty = _dec(payload.qty, "a number of shares") if payload.qty else Decimal(str(available))
+    if qty <= 0:
+        raise HTTPException(status_code=400, detail="Enter a number of shares above zero.")
+    if qty > Decimal(str(available)) + Decimal("0.000001"):
+        raise HTTPException(status_code=400,
+                            detail=f"You only have {available:.4f} {symbol} shares to sell.")
+    limit = _dec(payload.limit_price, "a price") if payload.order_type == "limit" else None
+    if limit is not None and qty != qty.to_integral_value():
+        raise HTTPException(status_code=400, detail="Selling at a price needs a whole number of shares.")
+
+    try:
+        price = Decimal(str(market.context(symbol)["price"]))
+    except (market.MarketDataError, KeyError, TypeError):
+        price = limit or Decimal("0")
+    estimate = (qty * (limit or price)).quantize(Decimal("0.01"))
+    order = {"notional": None, "qty": str(qty),
+             "limit_price": str(limit) if limit is not None else None,
+             "good_until": payload.good_until, "take_profit": None, "stop_loss": None,
+             "est_price": str(price)}
+    decision = decisions.propose(
+        user_id=user.user_id, enforce_open_limit=False,
+        symbol=symbol, side="sell", amount_usd=estimate, confidence=0.0,
+        reason="Sold on the user's own judgment.",
+        ttl_minutes=settings.decision_ttl_minutes,
+        policy={"long_only": True, "source": "sell", "order": order},
+    )
+    decision = decisions.answer(decision.decision_id, approved=True,
+                                responder=f"user:{user.user_id}", user_id=user.user_id)
+    return {"decision": decision.to_dict(), "execution": decision.execution or {}, "note": None,
+            "order": {**order, "estimate": str(estimate)}}
+
+
+@app.post("/api/orders/sell")
+def sell_order(payload: SellPayload, aitrader_session: str | None = Cookie(default=None)) -> dict[str, Any]:
+    user = _require_user(aitrader_session)
+    result = _place_sell(user, payload)
+    ex, o = result.get("execution") or {}, result.get("order") or {}
+    if ex.get("status") == "submitted":
+        at = f" at ${float(o['limit_price']):,.2f} or better" if o.get("limit_price") else ""
+        _notify(user.user_id, "orders",
+                alerts.order_text("placed", payload.symbol.upper(), f"Sell {o.get('qty')} shares{at}."),
+                [[{"text": "View in the app", "url": f"{_base_url()}/stock/{payload.symbol.upper()}"}]])
+    return result
+
+
 @app.post("/api/picks/buy")
 def buy_pick(payload: BuyPickPayload, aitrader_session: str | None = Cookie(default=None)) -> dict[str, Any]:
     user = _require_user(aitrader_session)
@@ -1692,6 +1802,7 @@ def stock_overview(symbol: str, aitrader_session: str | None = Cookie(default=No
         "run_id": run["run_id"] if run and pick else None,
         "bought_from_picks": bool(run and pick and symbol in _bought_from(run["run_id"], user.user_id)),
         "position": position, "open_orders": orders,
+        "shares_available": (broker.shares_available(symbol) if broker.configured else 0.0),
         "restricted": restricted,
         "can_trade": broker.configured and not user.is_demo,
         "is_demo": user.is_demo,

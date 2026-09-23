@@ -24,7 +24,7 @@
 
   function renderPositions(p) {
     if (!p.positions.length) { $("positions").innerHTML = '<p class="empty">No positions yet. Buy a pick from <a href="/app">Today’s picks</a>.</p>'; return; }
-    $("positions").innerHTML = '<div class="tbl" role="table"><div class="tr th" role="row"><span>Stock</span><span>Shares</span><span>Avg cost</span><span>Price</span><span>Value</span><span>Gain</span></div>' +
+    $("positions").innerHTML = '<div class="tbl" role="table"><div class="tr th" role="row"><span>Stock</span><span>Shares</span><span>Avg cost</span><span>Price</span><span>Value</span><span>Gain</span><span></span></div>' +
       p.positions.map(function (x) {
         var plpc = x.unrealized_plpc != null ? x.unrealized_plpc * 100 : null;
         return '<div class="tr" role="row"><span><a class="link-btn mono" href="/stock/' + encodeURIComponent(x.symbol) + '">' + esc(x.symbol) + '</a></span>' +
@@ -32,7 +32,8 @@
           '<span class="mono">' + (x.avg_entry_price ? money(x.avg_entry_price) : "—") + '</span>' +
           '<span class="mono">' + (x.current_price ? money(x.current_price) : "—") + '</span>' +
           '<span class="mono">' + money(x.market_value) + '</span>' +
-          '<span class="mono ' + tone(x.unrealized_pl) + '">' + (x.unrealized_pl != null ? signed(x.unrealized_pl) + pct(plpc) : "—") + '</span></div>';
+          '<span class="mono ' + tone(x.unrealized_pl) + '">' + (x.unrealized_pl != null ? signed(x.unrealized_pl) + pct(plpc) : "—") + '</span>' +
+          '<span><a class="btn btn-ghost btn-sm" href="/stock/' + encodeURIComponent(x.symbol) + '?sell=1">Sell</a></span></div>';
       }).join("") + '</div>';
   }
 

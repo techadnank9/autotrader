@@ -12,7 +12,7 @@
   }
   var SYM = decodeURIComponent(location.pathname.split("/").pop() || "").toUpperCase();
   var LABEL = { buy: "Buy", watch: "Watch", avoid: "Avoid" };
-  var ov = null, range = "1M", chartTimer = null, orderTimer = null;
+  var ov = null, range = "1M", chartTimer = null, orderTimer = null, ticketMode = "buy";
 
   /* ---------- header, chart ---------- */
   function renderHeader() {
@@ -120,15 +120,84 @@
   }
 
   /* ---------- order ticket ---------- */
+  function tabs() {
+    if (!(ov.shares_available > 0)) return "";
+    return '<div class="seg full tk-tabs" role="group" aria-label="Buy or sell">' +
+      '<button type="button" data-tk="buy" aria-pressed="' + (ticketMode !== "sell") + '">Buy</button>' +
+      '<button type="button" data-tk="sell" aria-pressed="' + (ticketMode === "sell") + '">Sell</button></div>';
+  }
+  function wireTabs() {
+    document.querySelectorAll("#ticket [data-tk]").forEach(function (b) {
+      b.onclick = function () { ticketMode = b.dataset.tk; renderTicket(); };
+    });
+  }
+
+  function renderSell() {
+    var t = $("ticket"), s = ov.stats, held = Number(ov.shares_available) || 0;
+    var whole = Math.floor(held), price = Number(s.price) || 0;
+    t.innerHTML = tabs() +
+      '<h2>Sell ' + esc(SYM) + '</h2>' +
+      '<p class="ticket-note">You hold <b class="mono">' + (held % 1 ? held.toFixed(4) : held) + '</b> share' + (held === 1 ? "" : "s") +
+        (price ? ' \u00b7 about ' + money(held * price) : '') + '</p>' +
+      '<form class="buy" novalidate>' +
+        '<div class="seg full" role="group" aria-label="Order type"><button type="button" data-t="market" aria-pressed="true">Sell now</button><button type="button" data-t="limit" aria-pressed="false">At a price</button></div>' +
+        '<div class="buy-row"><label class="field grow"><span>Shares</span><input data-f="qty" inputmode="decimal" autocomplete="off" value="' + (held % 1 ? held.toFixed(4) : held) + '"></label>' +
+          '<button class="btn btn-ghost" type="button" data-f="all">All</button></div>' +
+        '<div data-f="limit-box" hidden><label class="field"><span>Sell when the price is at or above</span><input data-f="limit" inputmode="decimal" autocomplete="off" value="' + (price ? price.toFixed(2) : "") + '"></label>' +
+          '<div class="seg full" role="group" aria-label="Good for" style="margin-top:10px"><button type="button" data-g="day" aria-pressed="true">Today only</button><button type="button" data-g="gtc" aria-pressed="false">Until canceled</button></div></div>' +
+        '<p class="buy-hint" data-f="est"></p>' +
+        (s.market_open ? '' : '<p class="note-line">The market is closed. The sell is sent now and works from 9:30 AM ET.</p>') +
+        '<p class="err" data-f="err" role="alert"></p>' +
+        '<button type="submit" class="btn btn-primary btn-block" data-f="go">Sell ' + esc(SYM) + '</button>' +
+      '</form>';
+    wireTabs();
+    var f = function (n) { return t.querySelector('[data-f="' + n + '"]'); };
+    var type = "market", good = "day";
+    function num(n) { var v = parseFloat(String(f(n).value).replace(/[$,\s]/g, "")); return isFinite(v) ? v : null; }
+    var seg = function (attr, set) { t.querySelectorAll("[data-" + attr + "]").forEach(function (b) { b.onclick = function () { set(b.dataset[attr]); t.querySelectorAll("[data-" + attr + "]").forEach(function (x) { x.setAttribute("aria-pressed", String(x === b)); }); recalc(); }; }); };
+    seg("t", function (v) { type = v; f("limit-box").hidden = v !== "limit"; });
+    seg("g", function (v) { good = v; });
+    f("all").onclick = function () { f("qty").value = held % 1 ? held.toFixed(4) : held; recalc(); };
+    ["qty", "limit"].forEach(function (n) { f(n).addEventListener("input", function () { f("err").textContent = ""; recalc(); }); });
+
+    function recalc() {
+      var q = num("qty"), lim = type === "limit" ? num("limit") : null, ok = true, msg = "";
+      if (!(q > 0)) { ok = false; msg = "Enter how many shares to sell."; }
+      else if (q > held + 1e-9) { ok = false; msg = "You only hold " + (held % 1 ? held.toFixed(4) : held) + " shares."; }
+      else if (type === "limit" && !(lim > 0)) { ok = false; msg = "Enter the price you want to sell at."; }
+      else if (type === "limit" && q !== Math.floor(q)) { ok = false; msg = "Selling at a price needs whole shares."; }
+      else { msg = "\u2248 " + money(q * (lim || price)) + (type === "limit" ? " if it fills at " + money(lim) : ""); }
+      if (ok && type === "limit" && lim < price * 0.999) msg += " Your price is below the current price, so it would fill right away.";
+      f("est").textContent = msg; f("go").disabled = !ok;
+      return { ok: ok, q: q, lim: lim };
+    }
+    recalc();
+
+    t.querySelector("form").addEventListener("submit", async function (e) {
+      e.preventDefault();
+      var c = recalc(); if (!c.ok) return;
+      var go = f("go"); go.disabled = true; go.textContent = "Placing order\u2026";
+      try {
+        var r = await api("/api/orders/sell", { method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ symbol: SYM, qty: String(c.q), order_type: type,
+            limit_price: c.lim != null ? String(c.lim) : null, good_until: good }) });
+        var ex = r.execution || {};
+        if (ex.status === "submitted" && ex.order_id) showOrder(ex.order_id, null);
+        else { f("err").textContent = ex.message || "The order was not placed."; recalc(); }
+      } catch (err) { f("err").textContent = err.message; recalc(); }
+    });
+  }
+
   function renderTicket() {
     var t = $("ticket"), s = ov.stats;
+    if (ticketMode === "sell" && ov.shares_available > 0 && ov.can_trade && !ov.is_demo) return renderSell();
     if (ov.is_demo) { t.innerHTML = '<h2>Buy ' + esc(SYM) + '</h2><p class="note-line"><a href="/login">Create an account</a> and connect a broker to trade.</p>'; return; }
     if (!ov.can_trade) { t.innerHTML = '<h2>Buy ' + esc(SYM) + '</h2><p class="note-line"><a href="/connect">Connect a broker</a> to trade.</p>'; return; }
     if (ov.restricted) { t.innerHTML = '<h2>Buy ' + esc(SYM) + '</h2><p class="note-line">' + esc(ov.restricted) + '</p>'; return; }
     var pickNote = ov.pick
       ? (ov.pick.verdict === "buy" ? (ov.bought_from_picks ? "You already bought this pick today." : "A buy in today’s picks.") : "Our read today is " + LABEL[ov.pick.verdict].toLowerCase() + ", not buy.")
       : "Not in today’s picks. This is your own call.";
-    t.innerHTML =
+    t.innerHTML = tabs() +
       '<h2>Buy ' + esc(SYM) + '</h2><p class="ticket-note">' + esc(pickNote) + '</p>' +
       '<form class="buy" novalidate>' +
         '<div class="seg full" role="group" aria-label="Order type"><button type="button" data-t="market" aria-pressed="true">Buy now</button><button type="button" data-t="limit" aria-pressed="false">At a price</button></div>' +
@@ -146,6 +215,7 @@
         '<button type="submit" class="btn btn-primary btn-block" data-f="go">Buy ' + esc(SYM) + '</button>' +
         '<p class="fine-line">' + (ov.broker === "paper" ? "Practice money" : (ov.mode === "live" ? "Real money" : "Paper account · practice money")) + (ov.buying_power ? " · Buying power " + money(ov.buying_power) : "") + '</p>' +
       '</form>';
+    wireTabs();
     wireTicket();
   }
 
@@ -263,6 +333,7 @@
     });
     try { await loadOverview(); } catch (e) { return; }
     renderTicket(); loadChart();
+    if (new URLSearchParams(location.search).get("sell") === "1" && ov.shares_available > 0) { ticketMode = "sell"; renderTicket(); }
     if (new URLSearchParams(location.search).get("buy") === "1") { var a = document.querySelector('#ticket [data-f="amount"]'); if (a) { a.focus(); a.select(); } }
     setInterval(function () { if (!document.hidden && ov && ov.stats.market_open) loadOverview(); }, 30000);
   }

@@ -65,6 +65,12 @@ class NullBroker:
     def place_notional_buy(self, symbol: str, notional: Decimal, client_order_id: str) -> dict[str, Any]:
         return {"status": "blocked", "message": "No broker connected, so no order was placed."}
 
+    def shares_available(self, symbol: str) -> float:
+        return 0.0
+
+    def place_sell(self, symbol: str, **_: Any) -> dict[str, Any]:
+        return {"status": "blocked", "message": "No broker connected."}
+
     def place_buy(self, symbol: str, **_: Any) -> dict[str, Any]:
         return {"status": "blocked", "message": "No broker connected, so no order was placed."}
 
@@ -279,6 +285,54 @@ class AlpacaBroker:
                 "order_id": o.get("id"), "client_order_id": o.get("client_order_id"),
                 "symbol": o.get("symbol"), "order_status": o.get("status"),
                 "message": f"{'Live' if self.live else 'Paper'} order sent to Alpaca."}
+
+    def shares_available(self, symbol: str) -> float:
+        """Shares Alpaca says are free to sell right now."""
+        try:
+            p = self._get(f"/v2/positions/{symbol.upper()}")
+        except BrokerError:
+            return 0.0
+        return float(p.get("qty_available") or p.get("qty") or 0)
+
+    def place_sell(self, symbol: str, *, client_order_id: str, qty: Decimal | None = None,
+                   limit_price: Decimal | None = None, good_until: str = "day",
+                   **_: Any) -> dict[str, Any]:
+        """Sell shares already held. Selling everything needs no quantity."""
+        symbol = symbol.upper().strip()
+        if not self.configured:
+            return {"status": "blocked", "message": "No broker connected."}
+        available = self.shares_available(symbol)
+        if available <= 0:
+            return {"status": "failed", "message": f"You don't hold any {symbol} to sell."}
+        want = qty if qty is not None else Decimal(str(available))
+        if want <= 0:
+            return {"status": "blocked", "message": "Enter a number of shares above zero."}
+        if float(want) > available + 1e-9:
+            return {"status": "failed",
+                    "message": f"You only have {available:.4f} {symbol} shares available to sell."}
+        whole = want == want.to_integral_value()
+        body: dict[str, Any] = {"symbol": symbol, "side": "sell", "client_order_id": client_order_id,
+                                "type": "limit" if limit_price is not None else "market",
+                                "qty": str(int(want)) if whole else f"{want.normalize()}",
+                                "time_in_force": "gtc" if (good_until == "gtc" and whole) else "day"}
+        if limit_price is not None:
+            if limit_price <= 0:
+                return {"status": "blocked", "message": "Enter a price above zero."}
+            if not whole:
+                return {"status": "blocked", "message": "Selling at a price needs whole shares."}
+            body["limit_price"] = f"{limit_price:.2f}"
+        try:
+            r = httpx.post(f"{self.base}/v2/orders", headers=self._headers(), json=body, timeout=20)
+        except httpx.HTTPError as exc:
+            return {"status": "failed", "message": f"Could not reach Alpaca: {type(exc).__name__}"}
+        if r.status_code >= 400:
+            detail = r.json().get("message") if "json" in r.headers.get("content-type", "") else r.text[:200]
+            return {"status": "rejected", "message": f"Alpaca rejected the order: {detail}"}
+        o = r.json()
+        return {"status": "submitted", "broker": self.name, "mode": "live" if self.live else "paper",
+                "order_id": o.get("id"), "client_order_id": o.get("client_order_id"),
+                "symbol": o.get("symbol"), "order_status": o.get("status"),
+                "message": f"{'Live' if self.live else 'Paper'} sell sent to Alpaca."}
 
     def _order_view(self, o: dict[str, Any]) -> dict[str, Any]:
         legs = o.get("legs") or []

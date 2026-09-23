@@ -193,10 +193,12 @@ class PaperBroker:
                         "time_in_force": "gtc", "submitted_at": _iso(_now()), "accepted_at": _iso(_now()),
                         "parent": o["id"],
                     })
-            else:  # an exit leg watching a position
+            else:  # a sell: plain, at a price, or an exit leg watching a position
                 tp = o.get("limit_price")
                 sl = o.get("stop_price")
-                hit = (tp is not None and px >= float(tp)) or (sl is not None and px <= float(sl))
+                hit = (True if tp is None and sl is None                      # sell now
+                       else (tp is not None and px >= float(tp))             # at or above the price
+                       or (sl is not None and px <= float(sl)))              # stop loss
                 if not (market_open and hit):
                     continue
                 pos = a["positions"].get(o["symbol"])
@@ -345,6 +347,39 @@ class PaperBroker:
         a["orders"].append(order)
         self._save()
         self._acct = None  # settle fresh so a market order fills right away
+        self._settle()
+        return {"status": "submitted", "order_id": order["id"], "mode": "paper"}
+
+    def shares_available(self, symbol: str) -> float:
+        """Shares held, minus any already committed to an open sell."""
+        a = self._settle()
+        held = (a["positions"].get(symbol.upper()) or {}).get("qty", 0.0)
+        committed = sum(float(o.get("qty") or 0) for o in a["orders"]
+                        if o["side"] == "sell" and o["status"] in OPEN_STATES and o["symbol"] == symbol.upper())
+        return max(0.0, held - committed)
+
+    def place_sell(self, symbol: str, *, client_order_id: str, qty: Decimal | None = None,
+                   limit_price: Decimal | None = None, good_until: str = "day",
+                   **_: Any) -> dict[str, Any]:
+        symbol = symbol.upper().strip()
+        a = self._settle()
+        available = self.shares_available(symbol)
+        if available <= 0:
+            return {"status": "failed", "message": f"You don't hold any {symbol} to sell."}
+        want = float(qty) if qty is not None else available
+        if want > available + 1e-9:
+            return {"status": "failed",
+                    "message": f"You only have {available:.4f} {symbol} shares available to sell."}
+        order = {
+            "id": uuid.uuid4().hex, "client_order_id": client_order_id, "symbol": symbol,
+            "side": "sell", "status": "accepted", "notional": None, "qty": f"{want:.6f}",
+            "limit_price": f"{float(limit_price):.2f}" if limit_price is not None else None,
+            "stop_price": None, "time_in_force": good_until,
+            "submitted_at": _iso(_now()), "accepted_at": _iso(_now()),
+        }
+        a["orders"].append(order)
+        self._save()
+        self._acct = None
         self._settle()
         return {"status": "submitted", "order_id": order["id"], "mode": "paper"}
 
