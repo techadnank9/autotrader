@@ -22,6 +22,7 @@
     }
 
     async function render() {
+      root = opts.root;   // a practice account re-points root at its sub-panel; start clean each time
       var b;
       try { b = await api("/api/broker/status"); }
       catch (e) { root.innerHTML = '<p class="empty">Could not check your brokerage.</p>'; return; }
@@ -29,6 +30,17 @@
       if (b.demo) {
         root.innerHTML = '<p class="empty">Demo sessions are shared between visitors, so they cannot hold brokerage keys. <a href="/login">Create an account</a> to connect a broker.</p>';
         return;
+      }
+      if (b.broker === "paper" && !b.saved) {
+        root.innerHTML =
+          '<div class="bk-live">' +
+            '<span class="pill on"><i></i>Practice account</span>' +
+            '<span class="conn-detail">$100,000 practice money' + (b.buying_power ? ' · ' + money(b.buying_power) + ' available' : '') +
+              ' · fills at real market prices, no real money</span>' +
+          '</div>' +
+          '<p class="panel-sub" style="margin-top:14px">Want approved calls to reach a real account? Connect a brokerage below — your practice account stays as it is.</p>' +
+          '<div id="bk-upgrade"></div>';
+        root = q("#bk-upgrade") || root;
       }
       if (b.saved) {
         var sv = b.saved, isRh = b.provider === "robinhood";

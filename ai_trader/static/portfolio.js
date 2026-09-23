@@ -13,7 +13,8 @@
     $("summary").innerHTML =
       '<div class="pf-head"><p class="pf-total mono">' + money(p.total_value) + '</p>' +
         (p.day_change != null ? '<p class="pf-day mono ' + tone(p.day_change) + '">' + signed(p.day_change) + pct(p.day_change_pct) + ' today</p>' : '') +
-        '<span class="pf-mode">' + (p.mode === "live" ? "Real money" : "Paper account") + ' · ' + esc(p.broker === "robinhood" ? "Robinhood" : "Alpaca") + '</span></div>' +
+        '<span class="pf-mode">' + (p.broker === "paper" ? "Practice money" :
+          (p.mode === "live" ? "Real money" : "Paper account") + ' · ' + esc(p.broker === "robinhood" ? "Robinhood" : "Alpaca")) + '</span></div>' +
       '<dl class="tiles">' +
         t("Cash", money(p.cash)) + t("Invested", money(p.invested)) + t("Buying power", money(p.buying_power)) +
         t("Unrealized gain", signed(p.unrealized_pl) + pct(p.unrealized_pl_pct), tone(p.unrealized_pl)) +

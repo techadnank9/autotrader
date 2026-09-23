@@ -144,7 +144,7 @@
         (s.market_open ? '' : '<p class="note-line">The market is closed. Orders are sent now and work from 9:30 AM ET.</p>') +
         '<p class="err" data-f="err" role="alert"></p>' +
         '<button type="submit" class="btn btn-primary btn-block" data-f="go">Buy ' + esc(SYM) + '</button>' +
-        '<p class="fine-line">' + (ov.mode === "live" ? "Real money" : "Paper account · practice money") + (ov.buying_power ? " · Buying power " + money(ov.buying_power) : "") + '</p>' +
+        '<p class="fine-line">' + (ov.broker === "paper" ? "Practice money" : (ov.mode === "live" ? "Real money" : "Paper account · practice money")) + (ov.buying_power ? " · Buying power " + money(ov.buying_power) : "") + '</p>' +
       '</form>';
     wireTicket();
   }

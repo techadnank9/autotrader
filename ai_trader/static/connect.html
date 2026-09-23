@@ -3,13 +3,13 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Connect your brokerage — AI Trader</title>
+<title>Start trading — AI Trader</title>
 <meta name="theme-color" content="#08090B">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/static/app.css?v=20260921192019">
-<link rel="stylesheet" href="/static/dashboard.css?v=20260921192019">
+<link rel="stylesheet" href="/static/app.css?v=20260923161640">
+<link rel="stylesheet" href="/static/dashboard.css?v=20260923161640">
 <style>
   .onb{max-width:880px;margin:0 auto;padding:clamp(32px,6vw,64px) clamp(18px,4vw,32px) 72px}
   .progress{display:grid;grid-template-columns:1fr 1fr;gap:6px;max-width:220px}
@@ -19,6 +19,14 @@
   .onb .lede{margin-top:14px;color:var(--text-2);max-width:58ch;font-size:16px}
   .onb .panel{margin-top:30px}
   .signed{margin-top:22px;font-size:13.5px;color:var(--text-3)}
+  .practice{border-color:#2e3a1c;background:linear-gradient(180deg,rgba(200,242,76,.06),transparent)}
+  .pr-row{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;flex-wrap:wrap}
+  .pr-row h2{font-size:18px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .pr-row .btn{flex:none}
+  .practice .err:empty{display:none}
+  .or-line{display:flex;align-items:center;gap:14px;margin:26px 0 0;color:var(--text-3);font-size:13px}
+  .or-line::before,.or-line::after{content:"";flex:1;height:1px;background:var(--line)}
+  @media (max-width:560px){.pr-row .btn{width:100%}}
   .signed button{background:none;border:0;padding:0;color:var(--text-2);font:inherit;text-decoration:underline;text-underline-offset:.2em;cursor:pointer}
 </style>
 </head>
@@ -34,8 +42,21 @@
 
 <main class="onb">
   <div class="progress" role="img" aria-label="Setup: account created, brokerage next"><i class="done"></i><i></i></div>
-  <h1>Connect your brokerage</h1>
-  <p class="lede">AI Trader places the calls you approve in your own account, and nowhere else. Connect one to finish setting up. You can switch or disconnect anytime from Profile.</p>
+  <h1>How do you want to trade?</h1>
+  <p class="lede">Start with practice money in seconds, or connect your own brokerage so approved calls go to your real account. You can switch anytime from Profile.</p>
+
+  <section class="panel practice" aria-labelledby="pr-h">
+    <div class="pr-row">
+      <div>
+        <h2 id="pr-h">Start with $100,000 practice money <span class="tag ok">Recommended</span></h2>
+        <p class="panel-sub">No brokerage, no API keys. You get a $100,000 practice account right now, and buys fill at real market prices. Nothing here is real money.</p>
+      </div>
+      <button class="btn btn-primary" type="button" id="pr-go">Start practicing</button>
+    </div>
+    <p class="err" id="pr-err" role="alert"></p>
+  </section>
+
+  <p class="or-line"><span>or connect your own brokerage</span></p>
 
   <section class="panel" aria-label="Choose a brokerage">
     <p class="note" id="bk-note" hidden></p>
@@ -45,7 +66,7 @@
   <p class="signed">Signed in as <span id="who">…</span> · <button type="button" id="signout">Sign out</button></p>
 </main>
 
-<script src="/static/broker.js?v=20260921192019"></script>
+<script src="/static/broker.js?v=20260923161640"></script>
 <script>
 (function(){
   var $ = function(id){ return document.getElementById(id); };
@@ -57,6 +78,16 @@
   $("signout").onclick = async function(){
     try { await fetch("/api/auth/logout", { method: "POST" }); } catch (e) {}
     location.href = "/login";
+  };
+
+  $("pr-go").onclick = async function(){
+    var b = this; b.disabled = true; b.textContent = "Setting up\u2026"; $("pr-err").textContent = "";
+    try {
+      var r = await fetch("/api/paper/start", { method: "POST" });
+      var d = await r.json().catch(function(){ return {}; });
+      if (!r.ok) throw new Error(d.detail || "Could not start the practice account.");
+      location.href = "/app?welcome=paper";
+    } catch (e) { $("pr-err").textContent = e.message; b.disabled = false; b.textContent = "Start practicing"; }
   };
 
   window.BrokerConnect.mount({

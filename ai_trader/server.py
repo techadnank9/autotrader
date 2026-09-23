@@ -26,6 +26,7 @@ from ai_trader import google_oauth
 from ai_trader import robinhood_mcp as rh
 from ai_trader.picks import FilePicksStore, PicksService
 from ai_trader.prefs import FileUserPrefs, PostgresUserPrefs
+from ai_trader.paper import FilePaperStore, PaperBroker, PostgresPaperStore
 from ai_trader import market
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -80,16 +81,20 @@ def _build_stores():
             return (PostgresUserStore(database), PostgresDecisionStore(database),
                     PostgresCredentialStore(database, cipher), PostgresPicksStore(database),
                     alerts.PostgresLinkStore(database), alerts.PostgresLinkStore(database, "imessage_links"),
-                    PostgresUserPrefs(database), "postgres")
+                    PostgresUserPrefs(database), PostgresPaperStore(database), "postgres")
         except Exception as exc:  # a broken DSN must not take the whole app down
             print(f"Postgres unavailable, falling back to file stores: {exc}")
     return (UserStore(settings.account_dir), DecisionStore(settings.decision_dir),
             FileCredentialStore(settings.account_dir, cipher), FilePicksStore(settings.replay_log_dir),
             alerts.FileLinkStore(settings.account_dir), alerts.FileLinkStore(settings.account_dir, "imessage_links.json"),
-            FileUserPrefs(settings.account_dir), "files")
+            FileUserPrefs(settings.account_dir), FilePaperStore(settings.account_dir), "files")
 
 
-users, decision_store, credential_store, picks_store, tg_links, im_links, user_prefs, STORAGE_BACKEND = _build_stores()
+users, decision_store, credential_store, picks_store, tg_links, im_links, user_prefs, paper_store, STORAGE_BACKEND = _build_stores()
+
+
+def _paper_broker(user_id: str) -> PaperBroker:
+    return PaperBroker(paper_store, user_id, market.quotes, settings.max_budget_usd)
 
 
 def _amount_for(user) -> Decimal:
@@ -127,9 +132,13 @@ def _broker_for_user(user_id: str):
                 rc, max_order_usd=settings.max_budget_usd,
                 persist=lambda upd: _save_robinhood(user_id, rc.key_id, upd["refresh_token"], upd["extra"]),
             )
-        return broker_for(credential_store.get(user_id, "alpaca"), settings)
+        alpaca = credential_store.get(user_id, "alpaca")
+        if alpaca is not None:
+            return broker_for(alpaca, settings)
     except CredentialError:
         return NullBroker()
+    paper = _paper_broker(user_id)          # a practice account when no brokerage is connected
+    return paper if paper.configured else NullBroker()
 SESSION_COOKIE = "aitrader_session"
 
 
@@ -216,6 +225,8 @@ def _needs_broker(user) -> bool:
     everyone when the server cannot store credentials, or nobody could get in.
     """
     if user.is_demo or not Cipher(settings.credentials_encryption_key).ready:
+        return False
+    if paper_store.get(user.user_id) is not None:
         return False
     try:
         return not any(credential_store.summary(user.user_id, p) for p in ("alpaca", "robinhood"))
@@ -1113,6 +1124,17 @@ class AmountPayload(BaseModel):
     amount_usd: float = Field(gt=0)
 
 
+@app.post("/api/paper/start")
+def paper_start(aitrader_session: str | None = Cookie(default=None)) -> dict[str, Any]:
+    """Open the $100,000 practice account. The user keeps it until they connect a brokerage."""
+    user = _require_user(aitrader_session)
+    if user.is_demo:
+        raise HTTPException(status_code=403, detail="Create an account first.")
+    if credential_store.summary(user.user_id, "alpaca") or credential_store.summary(user.user_id, "robinhood"):
+        raise HTTPException(status_code=409, detail="You already have a brokerage connected.")
+    return {"account": _paper_broker(user.user_id).open(), "mode": "paper"}
+
+
 @app.get("/api/settings")
 def get_settings(aitrader_session: str | None = Cookie(default=None)) -> dict[str, Any]:
     user = _require_user(aitrader_session)
@@ -1759,5 +1781,13 @@ def cron_research(authorization: str | None = Header(default=None)) -> dict[str,
     if not settings.cron_secret or authorization != f"Bearer {settings.cron_secret}":
         raise HTTPException(status_code=401, detail="Unauthorized.")
     run = picks.run_now()
+    settled = 0
+    for uid in paper_store.all_ids():   # move practice orders and equity on, visit or not
+        try:
+            _paper_broker(uid).account()
+            settled += 1
+        except Exception as exc:  # noqa: BLE001
+            print(f"paper settle failed for {uid}: {type(exc).__name__}")
     return {"run_id": run["run_id"], "status": run["status"], "picks": len(run["picks"]),
-            "took_seconds": run.get("took_seconds"), "alerts_sent": _broadcast_picks(run)}
+            "took_seconds": run.get("took_seconds"), "alerts_sent": _broadcast_picks(run),
+            "paper_settled": settled}

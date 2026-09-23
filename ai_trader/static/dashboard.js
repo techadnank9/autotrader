@@ -67,7 +67,9 @@
     if (user.is_demo) $("demo-note").hidden = false;
     var welcome = new URLSearchParams(location.search).get("welcome");
     if (welcome) {
-      $("welcome").innerHTML = "You’re set up. Your <b>" + (welcome === "robinhood" ? "Robinhood" : "Alpaca") + "</b> account is connected. Tap <b>Buy</b> on any pick to place an order.";
+      $("welcome").innerHTML = welcome === "paper"
+        ? "You’re set up with <b>$100,000 in practice money</b>. Tap <b>Buy</b> on any pick — orders fill at real market prices, with no real money at stake."
+        : "You’re set up. Your <b>" + (welcome === "robinhood" ? "Robinhood" : "Alpaca") + "</b> account is connected. Tap <b>Buy</b> on any pick to place an order.";
       $("welcome").hidden = false; history.replaceState(null, "", "/app");
     }
     $("refresh").onclick = function () { loadPicks(true); };

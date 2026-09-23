@@ -393,3 +393,47 @@ def stats(symbol: str, alpaca: AlpacaData | None = None) -> dict[str, Any]:
             s["pe_fy"] = round(s["price"] / f["eps_fy"], 1)
     s["fundamentals_source"] = "SEC filings" if f else None
     return s
+
+
+def quotes(symbols: list[str]) -> dict[str, Any]:
+    """Last price for several symbols at once, plus `__open__` for the market clock.
+
+    Used by the practice account to price positions and settle orders, so it is
+    cached briefly: a portfolio read must not fan out on every request.
+    """
+    symbols = [s.upper() for s in symbols if s]
+    key = "quotes:" + ",".join(sorted(set(symbols)))
+    hit = _cached(key, 45)
+    if hit is not None:
+        return hit
+
+    async def go():
+        async with httpx.AsyncClient(timeout=12) as c:
+            return await asyncio.gather(*[_chart(c, s, "1d", "5m") for s in sorted(set(symbols))],
+                                        return_exceptions=True)
+
+    out: dict[str, Any] = {"__open__": False}
+    if symbols:
+        for sym, res in zip(sorted(set(symbols)), asyncio.run(go())):
+            if isinstance(res, Exception):
+                continue
+            meta = res["meta"]
+            price = meta.get("regularMarketPrice") or (res["close"][-1] if res["close"] else None)
+            if price is not None:
+                out[sym] = float(price)
+            if market_open(meta):
+                out["__open__"] = True
+    else:
+        try:
+            out["__open__"] = market_open(_sync_chart("SPY")["meta"])
+        except (MarketDataError, httpx.HTTPError, KeyError, IndexError, ValueError):
+            pass
+    _cache[key] = (time.time(), out)
+    return out
+
+
+def _sync_chart(symbol: str) -> dict[str, Any]:
+    async def go():
+        async with httpx.AsyncClient(timeout=12) as c:
+            return await _chart(c, symbol, "1d", "5m")
+    return asyncio.run(go())
